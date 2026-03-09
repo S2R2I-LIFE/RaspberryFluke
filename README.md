@@ -116,7 +116,7 @@ sudo systemctl restart lldpd
 8. Clone the RaspberryFluke repository into /opt:
 
 sudo rm -rf /opt/raspberryfluke
-sudo git clone https://github.com/YOURUSERNAME/raspberryfluke.git /opt/raspberryfluke
+sudo git clone https://github.com/MKWB/raspberryfluke.git /opt/raspberryfluke
 sudo chown -R root:root /opt/raspberryfluke
 
 9. Clone the Waveshare repository:
