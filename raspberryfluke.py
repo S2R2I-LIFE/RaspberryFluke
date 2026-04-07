@@ -1,17 +1,3 @@
-This is a classic E-Ink display issue known as **"Ghosting" or "Stacking"**. 
-
-### Why this happened:
-E-Ink screens do partial refreshes by calculating the difference between the *old* image and the *new* image. When your script puts the display to `epd.sleep()` to save the screen's lifespan, the internal RAM on the display controller clears itself. 
-When it wakes up and you send a new `displayPartial()` command, the screen thinks the background is completely blank. As a result, it draws the new black text directly over the old black text without erasing it, resulting in a garbled mess of "N/A" and LLDP stats!
-
-### The Fix:
-We need to keep a copy of the `last_rendered_img` in the script's memory. When the screen wakes up to do a partial refresh, we must first use `epd.displayPartBaseImage()` to remind the screen what is currently physically on it, and *then* run the partial update.
-
-I also updated the "Change Detection" logic. Previously, it only updated the screen if the VLAN changed. I have updated it so that **if ANY of the 7 items change (Speed, Description, IP, etc.), the screen will automatically update.**
-
-Here is the fully corrected code. You can copy and paste this entire block over your existing script:
-
-```python
 import subprocess
 import time
 import threading
@@ -391,4 +377,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
+
