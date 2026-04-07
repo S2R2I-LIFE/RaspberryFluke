@@ -5,7 +5,7 @@ import signal
 import logging
 import re
 from PIL import Image, ImageDraw, ImageFont
-from waveshare_epd import epd2in13b_V4
+from waveshare_epd import epd2in13b_V3
 
 # ============================================================
 # -------------------- CONFIGURATION -------------------------
@@ -439,7 +439,7 @@ def main():
     signal.signal(signal.SIGTERM, handle_shutdown)
     signal.signal(signal.SIGINT, handle_shutdown)
     
-    epd = epd2in13b_V4.EPD() 
+    epd = epd2in13b_V3.EPD() 
     
     last_display_update_mono = 0.0
     first_ready_displayed = False
