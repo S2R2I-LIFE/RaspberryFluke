@@ -48,6 +48,7 @@ FONT_CACHE = {
 # ============================================================
 # -------------------- SHARED STATE --------------------------
 # ============================================================
+# Format: (SW, IP, PORT, NATIVE, VOICE, SPEED, DESC)
 current_data = ("Loading", "...", "...", "...", "...", "...", "...")
 data_lock = threading.Lock()
 data_event = threading.Event()
@@ -151,12 +152,6 @@ def extract_port_description(kv):
     if not descr: return "N/A"
     return (descr[:20] + "...") if len(descr) > 20 else descr
 
-def extract_native_vlan(kv):
-    val = kv.get(f"lldp.{IFACE}.vlan.vlan-id", "")
-    if not val:
-        val = kv.get(f"lldp.{IFACE}.port.vlan-id", "")
-    return _normalize_vlan(val)
-
 def extract_voice_vlan(kv):
     patterns = [
         rf"^lldp\.{re.escape(IFACE)}\..*med\.policy.*(voice|application).*vlan",
@@ -182,15 +177,56 @@ def extract_voice_vlan(kv):
             if m: return _normalize_vlan(m.group(1))
     return "N/A"
 
+def extract_native_vlan(kv, known_voice="N/A"):
+    # 1. PVID is the gold standard for Native VLAN
+    v = _find_first_match_value(kv, rf"^lldp\.{re.escape(IFACE)}\.port\.pvid")
+    if v: return _normalize_vlan(v)
+    
+    # 2. Collect all general VLAN keys
+    candidates = []
+    for k, val in kv.items():
+        if "vlan-id" in k or re.search(rf"^lldp\.{re.escape(IFACE)}\.vlan\.", k):
+            # Ignore explicitly named voice/med keys
+            if "med.policy" not in k and "voice" not in k and "cdp" not in k:
+                norm = _normalize_vlan(val)
+                if norm and norm != "N/A":
+                    candidates.append(norm)
+                    
+    # Remove the Voice VLAN from our list of Native candidates
+    candidates = [c for c in candidates if c != known_voice]
+    if candidates:
+        return candidates[0]
+        
+    # 3. Fallback to human-readable lldpctl output
+    out = run(["lldpctl"])
+    if out:
+        # Search specifically for PVID: XXXX
+        m = re.search(r"PVID\s*:\s*(\d+)", out, flags=re.IGNORECASE)
+        if m: return _normalize_vlan(m.group(1))
+        
+        # Search for any VLAN that isn't tagged as Voice
+        for line in out.splitlines():
+            if "vlan" in line.lower() and "voice" not in line.lower():
+                m2 = re.search(r"\b(\d{1,4})\b", line)
+                if m2:
+                    ans = _normalize_vlan(m2.group(1))
+                    if ans != known_voice: return ans
+                    
+    return "N/A"
+
 def get_switch_info():
     kv = parse_lldp_keyvalue()
     sw = extract_switch_hostname(kv)
     sw_ip = extract_switch_ip(kv)
     port = extract_port(kv)
-    vlan = extract_native_vlan(kv)
+    
+    # Order matters here: Find Voice first, then pass it to filter Native
     voice = extract_voice_vlan(kv)
+    vlan = extract_native_vlan(kv, known_voice=voice)
+    
     speed = extract_port_speed(kv)
     descr = extract_port_description(kv)
+    
     return (sw, sw_ip, port, vlan, voice, speed, descr)
 
 def is_data_ready(data):
@@ -223,16 +259,34 @@ def render_image(data):
     image = Image.new("1", (DISPLAY_WIDTH, DISPLAY_HEIGHT), 255)
     draw = ImageDraw.Draw(image)
     
-    vlan_str = f"VLAN: {data[3]}"
-    if data[4] != "N/A" and data[4] != data[3]:
-        vlan_str += f" | V-V: {data[4]}"
+    # 1. Clean Port Line (Hide Speed if N/A)
+    port_str = f"P: {data[2]}"
+    if data[5] != "N/A":
+        port_str += f" ({data[5]})"
+        
+    # 2. Clean VLAN Line Logic
+    native = data[3]
+    voice = data[4]
     
+    if native == "N/A" and voice == "N/A":
+        vlan_str = "VLAN: N/A"
+    elif native == "N/A" and voice != "N/A":
+        vlan_str = f"V-V: {voice}"
+    elif native != "N/A" and voice == "N/A":
+        vlan_str = f"VLAN: {native}"
+    else:
+        if native == voice:
+            vlan_str = f"VLAN: {native}"
+        else:
+            vlan_str = f"VLAN: {native} | V-V: {voice}"
+            
+    # 3. Assemble Display Lines
     lines = [
         f"SW: {data[0]}",
         f"IP: {data[1]}",
-        f"P: {data[2]} ({data[5]})", 
-        f"D: {data[6]}",              
-        vlan_str,                     
+        port_str,
+        f"D: {data[6]}",
+        vlan_str,
     ]
     
     y = TOP_MARGIN
@@ -270,7 +324,7 @@ def main():
     no_neighbor_displayed = False
     boot_start_mono = time.monotonic()
     
-    # TRACK STATE FOR PROPER E-INK REFRESHES
+    # State tracking to prevent E-Ink ghosting
     last_displayed_snap = None
     last_rendered_img = None
     
@@ -327,7 +381,7 @@ def main():
             if not is_data_ready(snap):
                 continue
                 
-            # Trigger an update if ANY of the 7 data points change
+            # Trigger refresh if ANY of the 7 data points change
             if last_displayed_snap is not None and snap != last_displayed_snap:
                 if (now_mono - last_display_update_mono) < MIN_DISPLAY_UPDATE_INTERVAL_SECONDS:
                     continue
@@ -342,13 +396,13 @@ def main():
                     log.info("Data change: full refresh.")
                 else:
                     try:
-                        # CRITICAL FIX: Remind display of the previous image before drawing new ones
+                        # Remind screen of previous image to prevent stacking/ghosting
                         epd.displayPartBaseImage(epd.getbuffer(last_rendered_img))
                         epd.displayPartial(epd.getbuffer(img))
                         partial_refresh_count += 1
                         log.info("Data change: partial refresh.")
                     except AttributeError:
-                        # Fallback if library version doesn't support BaseImage
+                        # Fallback if library version lacks BaseImage support
                         epd.Clear(0xFF)
                         epd.display(epd.getbuffer(img))
                         partial_refresh_count = 0
@@ -377,4 +431,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
