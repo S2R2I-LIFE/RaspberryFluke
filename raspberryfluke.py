@@ -5,7 +5,7 @@ import signal
 import logging
 import re
 from PIL import Image, ImageDraw, ImageFont
-from waveshare_epd import epd2in13_V3
+from waveshare_epd import epd2in13_V4
 
 # ============================================================
 # -------------------- CONFIGURATION -------------------------
@@ -399,23 +399,27 @@ def handle_shutdown(signum, frame):
 def main():
     signal.signal(signal.SIGTERM, handle_shutdown)
     signal.signal(signal.SIGINT, handle_shutdown)
-    epd = epd2in13_V3.EPD()
-    partial_refresh_count = 0
-    last_display_update_mono = 0.0
     
+    # NOTE: Use the 'b' version here!
+    epd = epd2in13b_V4.EPD() 
+    
+    last_display_update_mono = 0.0
     first_ready_displayed = False
     no_neighbor_displayed = False
     boot_start_mono = time.monotonic()
-    
     last_displayed_snap = None
-    last_rendered_img = None
+    
+    # Create an empty RED image (so we only print in Black)
+    red_image = Image.new("1", (DISPLAY_WIDTH, DISPLAY_HEIGHT), 255)
+    red_buffer = epd.getbuffer(red_image.rotate(180))
     
     try:
         epd.init()
-        epd.Clear(0xFF)
+        epd.Clear()
+        
         boot_img = render_image(("Loading", "...", "...", "...", "...", "...", "...", "..."))
-        epd.display(epd.getbuffer(boot_img))
-        last_rendered_img = boot_img
+        # 3-color displays take TWO buffers: Black and Red
+        epd.display(epd.getbuffer(boot_img), red_buffer)
         log.info("Displayed boot screen (Loading)")
         
         threading.Thread(target=data_collector, daemon=True).start()
@@ -430,31 +434,25 @@ def main():
             if not first_ready_displayed:
                 if is_data_ready(snap):
                     epd.init()
-                    epd.Clear(0xFF)
                     img = render_image(snap)
-                    epd.display(epd.getbuffer(img))
+                    epd.display(epd.getbuffer(img), red_buffer)
                     epd.sleep()
                     
                     first_ready_displayed = True
                     no_neighbor_displayed = False
-                    partial_refresh_count = 0
                     last_display_update_mono = now_mono
                     last_displayed_snap = snap
-                    last_rendered_img = img
                     log.info("First neighbor displayed. Now monitoring changes.")
                     continue
                 
                 if (not no_neighbor_displayed) and ((now_mono - boot_start_mono) >= NO_NEIGHBOR_TIMEOUT_SECONDS):
                     epd.init()
-                    epd.Clear(0xFF)
                     img = render_no_neighbor()
-                    epd.display(epd.getbuffer(img))
+                    epd.display(epd.getbuffer(img), red_buffer)
                     epd.sleep()
                     
                     no_neighbor_displayed = True
-                    partial_refresh_count = 0
                     last_display_update_mono = now_mono
-                    last_rendered_img = img
                     log.warning("No neighbor after %ss; displayed NO NEIGHBOR screen.", NO_NEIGHBOR_TIMEOUT_SECONDS)
                 continue
                 
@@ -462,37 +460,21 @@ def main():
                 continue
                 
             if last_displayed_snap is not None and snap != last_displayed_snap:
-                if (now_mono - last_display_update_mono) < MIN_DISPLAY_UPDATE_INTERVAL_SECONDS:
+                # Give it at least 15-20 seconds between updates since the hardware is slow
+                if (now_mono - last_display_update_mono) < 20.0:
                     continue
                 
+                log.info("Data change detected: Full refresh starting (Takes ~15s)...")
                 epd.init()
                 img = render_image(snap)
                 
-                if partial_refresh_count >= PARTIAL_REFRESH_LIMIT or last_rendered_img is None:
-                    epd.Clear(0xFF)
-                    epd.display(epd.getbuffer(img))
-                    partial_refresh_count = 0
-                    log.info("Data change: full refresh.")
-                else:
-                    try:
-                        epd.displayPartBaseImage(epd.getbuffer(last_rendered_img))
-                        epd.displayPartial(epd.getbuffer(img))
-                        partial_refresh_count += 1
-                        log.info("Data change: partial refresh.")
-                    except AttributeError:
-                        epd.Clear(0xFF)
-                        epd.display(epd.getbuffer(img))
-                        partial_refresh_count = 0
-                    except Exception:
-                        epd.Clear(0xFF)
-                        epd.display(epd.getbuffer(img))
-                        partial_refresh_count = 0
-                        log.warning("Partial refresh failed; full refresh used.", exc_info=True)
-                
+                # Full refresh with Black and Red buffers
+                epd.display(epd.getbuffer(img), red_buffer)
                 epd.sleep()
+                
                 last_display_update_mono = now_mono
                 last_displayed_snap = snap
-                last_rendered_img = img
+                log.info("Refresh complete.")
                 
         try:
             epd.sleep()
@@ -505,6 +487,3 @@ def main():
         except Exception:
             pass
         raise
-
-if __name__ == "__main__":
-    main()
