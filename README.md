@@ -42,9 +42,11 @@ The goal was to build a simple, practical tool using inexpensive and widely avai
 ```text
 SW: SWITCH-01  
 IP: 10.10.1.2  
-P: Gi1/0/24
-D: Description  
-VLAN: 120  VOICE: 130
+P: ge-1/0/24 | 13W
+D: Description on port 
+VLAN: 120  V-V: 130
+M: ex2300-c-12p
+OS: JUNOS 21.4R3-S2.4
 ```
 
 ---
@@ -53,8 +55,11 @@ VLAN: 120  VOICE: 130
 
 - Raspberry Pi Zero 2 W
 - 40-pin male GPIO Header
-- Waveshare 2.13" E-Paper HAT+ display (SKU 27467)
 - Waveshare PoE Ethernet / USB HUB BOX (SKU 20895)
+- Tested displays:
+    Waveshare 2.13" E-Paper HAT+ display (SKU 27467)
+    Waveshare 2.13" E-Paper HAT (B), 250x122, Red/Black/White, SPI (SKU 13448)
+
 
 ---
 
