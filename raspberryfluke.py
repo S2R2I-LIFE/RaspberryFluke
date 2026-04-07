@@ -1,3 +1,17 @@
+This is a classic E-Ink display issue known as **"Ghosting" or "Stacking"**. 
+
+### Why this happened:
+E-Ink screens do partial refreshes by calculating the difference between the *old* image and the *new* image. When your script puts the display to `epd.sleep()` to save the screen's lifespan, the internal RAM on the display controller clears itself. 
+When it wakes up and you send a new `displayPartial()` command, the screen thinks the background is completely blank. As a result, it draws the new black text directly over the old black text without erasing it, resulting in a garbled mess of "N/A" and LLDP stats!
+
+### The Fix:
+We need to keep a copy of the `last_rendered_img` in the script's memory. When the screen wakes up to do a partial refresh, we must first use `epd.displayPartBaseImage()` to remind the screen what is currently physically on it, and *then* run the partial update.
+
+I also updated the "Change Detection" logic. Previously, it only updated the screen if the VLAN changed. I have updated it so that **if ANY of the 7 items change (Speed, Description, IP, etc.), the screen will automatically update.**
+
+Here is the fully corrected code. You can copy and paste this entire block over your existing script:
+
+```python
 import subprocess
 import time
 import threading
@@ -15,7 +29,6 @@ DISPLAY_HEIGHT = 122
 LEFT_MARGIN = 10
 TOP_MARGIN = 4
 
-# Slightly larger font since we combined VLANs (4 lines total)
 BASE_FONT_SIZE = 16
 MIN_FONT_SIZE = 10
 LINE_SPACING = 2
@@ -49,7 +62,6 @@ FONT_CACHE = {
 # ============================================================
 # -------------------- SHARED STATE --------------------------
 # ============================================================
-# FIXED: Now 7 items to match (SW, IP, PORT, NATIVE, VOICE, SPEED, DESC)
 current_data = ("Loading", "...", "...", "...", "...", "...", "...")
 data_lock = threading.Lock()
 data_event = threading.Event()
@@ -214,7 +226,6 @@ def data_collector():
                 current_data = new_data
                 data_event.set()
         if last != new_data:
-            # FIXED: 7 format placeholders for the 7 variables
             log.info("Data update: SW=%s IP=%s PORT=%s VLAN=%s VOICE=%s SPEED=%s DESC=%s", *new_data)
             last = new_data
         time.sleep(POLL_INTERVAL_SECONDS)
@@ -249,7 +260,6 @@ def render_image(data):
     return image.rotate(180)
 
 def render_no_neighbor():
-    # FIXED: 7 "N/A" items instead of 5
     return render_image(("NO NEIGHBOR", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"))
 
 # ============================================================
@@ -269,18 +279,21 @@ def main():
     epd = epd2in13_V3.EPD()
     partial_refresh_count = 0
     last_display_update_mono = 0.0
+    
     first_ready_displayed = False
     no_neighbor_displayed = False
     boot_start_mono = time.monotonic()
-    last_displayed_vlan = None
-    last_displayed_voice_vlan = None
+    
+    # TRACK STATE FOR PROPER E-INK REFRESHES
+    last_displayed_snap = None
+    last_rendered_img = None
     
     try:
         epd.init()
         epd.Clear(0xFF)
-        # FIXED: 7 items instead of 5
         boot_img = render_image(("Loading", "...", "...", "...", "...", "...", "..."))
         epd.display(epd.getbuffer(boot_img))
+        last_rendered_img = boot_img
         log.info("Displayed boot screen (Loading)")
         
         threading.Thread(target=data_collector, daemon=True).start()
@@ -292,6 +305,7 @@ def main():
                 snap = current_data
             now_mono = time.monotonic()
             
+            # --- PHASE 1: BOOTING / WAITING FOR FIRST NEIGHBOR ---
             if not first_ready_displayed:
                 if is_data_ready(snap):
                     epd.init()
@@ -299,58 +313,69 @@ def main():
                     img = render_image(snap)
                     epd.display(epd.getbuffer(img))
                     epd.sleep()
+                    
                     first_ready_displayed = True
                     no_neighbor_displayed = False
-                    last_displayed_vlan = snap[3]
-                    last_displayed_voice_vlan = snap[4]
                     partial_refresh_count = 0
                     last_display_update_mono = now_mono
+                    last_displayed_snap = snap
+                    last_rendered_img = img
                     log.info("First neighbor displayed. Now monitoring changes.")
                     continue
+                
                 if (not no_neighbor_displayed) and ((now_mono - boot_start_mono) >= NO_NEIGHBOR_TIMEOUT_SECONDS):
                     epd.init()
                     epd.Clear(0xFF)
                     img = render_no_neighbor()
                     epd.display(epd.getbuffer(img))
                     epd.sleep()
+                    
                     no_neighbor_displayed = True
                     partial_refresh_count = 0
                     last_display_update_mono = now_mono
+                    last_rendered_img = img
                     log.warning("No neighbor after %ss; displayed NO NEIGHBOR screen.", NO_NEIGHBOR_TIMEOUT_SECONDS)
                 continue
                 
+            # --- PHASE 2: CONTINUOUS MONITORING ---
             if not is_data_ready(snap):
                 continue
                 
-            current_vlan = snap[3]
-            current_voice = snap[4]
-            vlan_changed = (last_displayed_vlan is not None and current_vlan != last_displayed_vlan)
-            voice_changed = (last_displayed_voice_vlan is not None and current_voice != last_displayed_voice_vlan)
-            
-            if vlan_changed or voice_changed:
+            # Trigger an update if ANY of the 7 data points change
+            if last_displayed_snap is not None and snap != last_displayed_snap:
                 if (now_mono - last_display_update_mono) < MIN_DISPLAY_UPDATE_INTERVAL_SECONDS:
                     continue
+                
                 epd.init()
                 img = render_image(snap)
-                if partial_refresh_count >= PARTIAL_REFRESH_LIMIT:
+                
+                if partial_refresh_count >= PARTIAL_REFRESH_LIMIT or last_rendered_img is None:
                     epd.Clear(0xFF)
                     epd.display(epd.getbuffer(img))
                     partial_refresh_count = 0
-                    log.info("VLAN/VOICE change: full refresh.")
+                    log.info("Data change: full refresh.")
                 else:
                     try:
+                        # CRITICAL FIX: Remind display of the previous image before drawing new ones
+                        epd.displayPartBaseImage(epd.getbuffer(last_rendered_img))
                         epd.displayPartial(epd.getbuffer(img))
                         partial_refresh_count += 1
-                        log.info("VLAN/VOICE change: partial refresh.")
+                        log.info("Data change: partial refresh.")
+                    except AttributeError:
+                        # Fallback if library version doesn't support BaseImage
+                        epd.Clear(0xFF)
+                        epd.display(epd.getbuffer(img))
+                        partial_refresh_count = 0
                     except Exception:
                         epd.Clear(0xFF)
                         epd.display(epd.getbuffer(img))
                         partial_refresh_count = 0
                         log.warning("Partial refresh failed; full refresh used.", exc_info=True)
+                
                 epd.sleep()
-                last_displayed_vlan = current_vlan
-                last_displayed_voice_vlan = current_voice
                 last_display_update_mono = now_mono
+                last_displayed_snap = snap
+                last_rendered_img = img
                 
         try:
             epd.sleep()
@@ -366,3 +391,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
