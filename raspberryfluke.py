@@ -21,7 +21,7 @@ TOP_MARGIN = 4
 
 # Font sizing rules.
 # Five lines must fit vertically, so the base size is intentionally smaller.
-BASE_FONT_SIZE = 16
+BASE_FONT_SIZE = 14
 MIN_FONT_SIZE = 10
 LINE_SPACING = 2  # Extra pixels between lines.
 
@@ -254,105 +254,92 @@ def extract_port(kv):
     port = shorten_interface(port) if port else "N/A"
     return port
 
+def extract_port_speed(kv):
+    """ Extract port speed (e.g., 1000Mbps -> 1G) """
+    speed = kv.get(f"lldp.{IFACE}.port.speed", "")
+    if speed:
+        # Convert 1000 to 1G, 10000 to 10G
+        if speed == "1000": return "1G"
+        if speed == "10000": return "10G"
+        return f"{speed}M"
+    return "N/A"
+
+def extract_port_description(kv):
+    """ Extract the administrative port description """
+    descr = kv.get(f"lldp.{IFACE}.port.descr", "").strip()
+    if not descr:
+        return "N/A"
+    return (descr[:20] + "...") if len(descr) > 20 else descr
+
 def extract_native_vlan(kv):
     """
-    Extract the native VLAN (PVID) / untagged VLAN ID.
-
-    This is commonly provided as:
-      lldp.<iface>.vlan.vlan-id
+    STRICTLY look for the Port VLAN (PVID).
+    Explicitly ignores MED/CDP policy keys to prevent collision with Voice VLANs.
     """
-    vlan = kv.get(f"lldp.{IFACE}.vlan.vlan-id", "") or ""
-    return _normalize_vlan(vlan)
+    # Check standard location first
+    val = kv.get(f"lldp.{IFACE}.vlan.vlan-id", "")
+    
+    # Fallback to secondary location if primary is missing
+    if not val:
+        val = kv.get(f"lldp.{IFACE}.port.vlan-id", "")
+        
+    return _normalize_vlan(val)
 
 def extract_voice_vlan(kv):
     """
-    Extract the Voice VLAN.
-
-    Priority order:
-      1) LLDP-MED network policy voice VLAN (best/cleanest)
-      2) Any CDP/aux/voice-related keyvalue fields exposed by lldpd (varies by build)
-      3) Fallback: parse human-readable `lldpctl` output for "Voice VLAN"/"Auxiliary VLAN"
-
-    If nothing is found, return N/A.
+    EXHAUSTIVE search for Voice VLAN. 
+    Prioritizes LLDP-MED (Arista/Juniper) then falls back to Cisco CDP/Aux, 
+    finally using human-readable parsing as a last resort.
     """
-    # ---- 1) LLDP-MED policy (most standards-based) ----
-    v = _find_first_match_value(
-        kv,
-        rf"^lldp\.{re.escape(IFACE)}\..*med\.policy.*voice.*vlan"
-    )
-    if not v:
-        v = _find_first_match_value(
-            kv,
-            rf"^lldp\.{re.escape(IFACE)}\..*med\.policy.*application.*voice.*vlan"
-        )
+    # 1. LLDP-MED & Application Policy search (Arista/Juniper/Standard)
+    # The '.*' handles dynamic indices like 'med.policy.0...'
+    patterns = [
+        rf"^lldp\.{re.escape(IFACE)}\..*med\.policy.*(voice|application).*vlan",
+        rf"^lldp\.{re.escape(IFACE)}\..*med\.policy.*vlan-id"
+    ]
+    
+    for p in patterns:
+        v = _find_first_match_value(kv, p)
+        if v:
+            return _normalize_vlan(v)
+            
+    # 2. Cisco/CDP Legacy/Compatibility search
+    v = _find_first_match_value(kv, rf"^lldp\.{re.escape(IFACE)}\..*(cdp|aux).*(voice|vlan)")
     if v:
         return _normalize_vlan(v)
 
-    # ---- 2) CDP / Cisco Aux VLAN mappings (key names vary) ----
-    # Some lldpd builds expose CDP fields in keyvalue output; we search broadly for:
-    #   - 'cdp' + ('voice' or 'aux') + 'vlan'
-    #   - or any key that includes aux/voice vlan even without explicit 'cdp'
-    v = _find_first_match_value(
-        kv,
-        rf"^lldp\.{re.escape(IFACE)}\..*(cdp).*(voice|aux).*(vlan)"
-    )
-    if not v:
-        v = _find_first_match_value(
-            kv,
-            rf"^lldp\.{re.escape(IFACE)}\..*(voice|aux).*(vlan)"
-        )
-    if v:
-        return _normalize_vlan(v)
-
-    # ---- 3) Fallback: parse human-readable lldpctl output ----
-    # This catches cases where the info exists but isn't exported as keyvalue.
+    # 3. Fallback: Parse human-readable lldpctl output (The Court of Last Resort)
     out = run(["lldpctl"])
     if out:
-        # Look for common phrasing seen in Cisco/LLDP-MED outputs.
-        # Examples might include:
-        #   "Voice VLAN: 2100"
-        #   "Auxiliary VLAN: 2100"
-        #   "VLAN: 2100 (voice)"
         patterns = [
             r"Voice\s+VLAN\s*:\s*(\d{1,4})",
             r"Auxiliary\s+VLAN\s*:\s*(\d{1,4})",
-            r"\bvoice\b.*\bVLAN\b.*?(\d{1,4})",
+            r"Application\s+VLAN\s*:\s*(\d{1,4})",
+            r"\bvoice\b.*\bVLAN\b.*?(\d{1,4})"
         ]
         for p in patterns:
             m = re.search(p, out, flags=re.IGNORECASE)
             if m:
                 return _normalize_vlan(m.group(1))
-
+                
     return "N/A"
 
 def get_switch_info():
-    """
-    Collect switch hostname, switch management IP, port, VLAN, and voice VLAN.
-    Returns: (SW, SW_IP, PORT, VLAN, VOICE_VLAN)
-    """
     kv = parse_lldp_keyvalue()
-
     sw = extract_switch_hostname(kv)
     sw_ip = extract_switch_ip(kv)
     port = extract_port(kv)
     vlan = extract_native_vlan(kv)
     voice = extract_voice_vlan(kv)
-
-    return (sw, sw_ip, port, vlan, voice)
+    speed = extract_port_speed(kv)
+    descr = extract_port_description(kv)
+    return (sw, sw_ip, port, vlan, voice, speed, descr)
 
 def is_data_ready(data):
-    """
-    Determine whether the essential neighbor information is populated.
-
-    We treat VOICE VLAN as optional, because not all environments advertise LLDP-MED policy.
-    """
-    sw, _sw_ip, port, vlan, _voice = data
-    if sw in ("Loading", "N/A", ""):
-        return False
-    if port in ("...", "N/A", ""):
-        return False
-    if vlan in ("...", "N/A", ""):
-        return False
+    sw, sw_ip, port, vlan, voice, speed, descr = data
+    # Keep your existing checks, but just ensure you're referencing the right index
+    if sw in ("Loading", "N/A", ""): return False
+    if port in ("...", "N/A", ""): return False
     return True
 
 # ============================================================
@@ -386,34 +373,32 @@ def data_collector():
 # ============================================================
 
 def render_image(data):
-    """
-    Render the 5-line display layout in the user-requested order:
-      1) SW
-      2) Switch IP
-      3) Port
-      4) VLAN
-      5) Voice VLAN
-    """
+    # Data index: 0:SW, 1:IP, 2:PORT, 3:NATIVE, 4:VOICE, 5:SPEED, 6:DESC
     image = Image.new("1", (DISPLAY_WIDTH, DISPLAY_HEIGHT), 255)
     draw = ImageDraw.Draw(image)
-
+    
+    # 1. Merge VLANs: "VLAN: <NATIVE> | V-V: <VOICE>"
+    vlan_str = f"VLAN: {data[3]}"
+    if data[4] != "N/A" and data[4] != data[3]:
+        vlan_str += f" | V-V: {data[4]}"
+    
+    # 2. Prepare all lines for the display
     lines = [
         f"SW: {data[0]}",
         f"IP: {data[1]}",
-        f"PORT: {data[2]}",
-        f"VLAN: {data[3]}",
-        f"VOICE: {data[4]}",
+        f"P: {data[2]} ({data[5]})",  # Port + Speed
+        f"D: {data[6]}",              # Description
+        vlan_str,                     # Merged VLAN line
     ]
-
+    
     y = TOP_MARGIN
     max_width = DISPLAY_WIDTH - (LEFT_MARGIN * 2)
-
+    
     for line in lines:
         font = fit_font(draw, line, max_width)
         draw.text((LEFT_MARGIN, y), line, font=font, fill=0)
         y += font.size + LINE_SPACING
-
-    # Rotates image on screen so that eth0 is on top.
+        
     return image.rotate(180)
 
 def render_no_neighbor():
