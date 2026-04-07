@@ -340,47 +340,73 @@ def data_collector():
 # -------------------- DISPLAY RENDERING ---------------------
 # ============================================================
 def render_image(data):
-    image = Image.new("1", (DISPLAY_WIDTH, DISPLAY_HEIGHT), 255)
-    draw = ImageDraw.Draw(image)
+    """
+    Renders TWO images for 3-color E-Ink displays.
+    Labels are drawn on the Black buffer, Variables are drawn on the Red buffer.
+    """
+    # Create two separate white canvases
+    image_black = Image.new("1", (DISPLAY_WIDTH, DISPLAY_HEIGHT), 255)
+    image_red = Image.new("1", (DISPLAY_WIDTH, DISPLAY_HEIGHT), 255)
     
-    port_str = f"P: {data[2]}"
+    draw_black = ImageDraw.Draw(image_black)
+    draw_red = ImageDraw.Draw(image_red)
+    
+    # We build the lines using a list of tuples: (Text, is_red)
+    # True = Draw in Red buffer, False = Draw in Black buffer
+    
+    # Line 1: SW
+    line1 = [("SW: ", False), (data[0], True)]
+    # Line 2: IP
+    line2 = [("IP: ", False), (data[1], True)]
+    
+    # Line 3: Port + Speed + PoE
+    line3 = [("P: ", False), (data[2], True)]
     if data[5] != "N/A":
-        port_str += f" ({data[5]})"
+        line3.extend([(" (", False), (data[5], True), (")", False)])
     if data[7] != "N/A":
-        port_str += f" | {data[7]}"
+        line3.extend([(" | ", False), (data[7], True)])
         
-    native = data[3]
-    voice = data[4]
+    # Line 4: Description
+    line4 = [("D: ", False), (data[6], True)]
     
+    # Line 5: VLAN logic
+    native, voice = data[3], data[4]
     if native == "N/A" and voice == "N/A":
-        vlan_str = "VLAN: N/A"
+        line5 = [("VLAN: ", False), ("N/A", True)]
     elif native == "N/A" and voice != "N/A":
-        vlan_str = f"V-V: {voice}"
+        line5 = [("V-V: ", False), (voice, True)]
     elif native != "N/A" and voice == "N/A":
-        vlan_str = f"VLAN: {native}"
+        line5 = [("VLAN: ", False), (native, True)]
     else:
         if native == voice:
-            vlan_str = f"VLAN: {native}"
+            line5 = [("VLAN: ", False), (native, True)]
         else:
-            vlan_str = f"VLAN: {native} | V-V: {voice}"
+            line5 = [("VLAN: ", False), (native, True), (" | V-V: ", False), (voice, True)]
             
-    lines = [
-        f"SW: {data[0]}",
-        f"IP: {data[1]}",
-        port_str,
-        f"D: {data[6]}",
-        vlan_str,
-    ]
+    lines = [line1, line2, line3, line4, line5]
     
     y = TOP_MARGIN
     max_width = DISPLAY_WIDTH - (LEFT_MARGIN * 2)
     
-    for line in lines:
-        font = fit_font(draw, line, max_width)
-        draw.text((LEFT_MARGIN, y), line, font=font, fill=0)
+    for line_spans in lines:
+        # Reconstruct the full string just to calculate the correct font size
+        full_text = "".join([span[0] for span in line_spans])
+        font = fit_font(draw_black, full_text, max_width)
+        
+        x = LEFT_MARGIN
+        # Draw each chunk of text in the correct color buffer, moving X over each time
+        for text, is_red in line_spans:
+            if is_red:
+                draw_red.text((x, y), text, font=font, fill=0)
+            else:
+                draw_black.text((x, y), text, font=font, fill=0)
+            
+            # Move the cursor to the right by the width of the word we just drew
+            x += draw_black.textlength(text, font=font)
+            
         y += font.size + LINE_SPACING
         
-    return image.rotate(180)
+    return image_black.rotate(180), image_red.rotate(180)
 
 def render_no_neighbor():
     return render_image(("NO NEIGHBOR", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"))
@@ -400,7 +426,7 @@ def main():
     signal.signal(signal.SIGTERM, handle_shutdown)
     signal.signal(signal.SIGINT, handle_shutdown)
     
-    # NOTE: Use the 'b' version here!
+    # ENSURE THIS MATCHES YOUR BOARD VERSION (epd2in13b_V4 or V3)
     epd = epd2in13b_V4.EPD() 
     
     last_display_update_mono = 0.0
@@ -409,17 +435,14 @@ def main():
     boot_start_mono = time.monotonic()
     last_displayed_snap = None
     
-    # Create an empty RED image (so we only print in Black)
-    red_image = Image.new("1", (DISPLAY_WIDTH, DISPLAY_HEIGHT), 255)
-    red_buffer = epd.getbuffer(red_image.rotate(180))
-    
     try:
         epd.init()
         epd.Clear()
         
-        boot_img = render_image(("Loading", "...", "...", "...", "...", "...", "...", "..."))
-        # 3-color displays take TWO buffers: Black and Red
-        epd.display(epd.getbuffer(boot_img), red_buffer)
+        # Render the boot image (Unpacks the TWO buffers)
+        img_b, img_r = render_image(("Loading", "...", "...", "...", "...", "...", "...", "..."))
+        epd.display(epd.getbuffer(img_b), epd.getbuffer(img_r))
+        
         log.info("Displayed boot screen (Loading)")
         
         threading.Thread(target=data_collector, daemon=True).start()
@@ -434,8 +457,8 @@ def main():
             if not first_ready_displayed:
                 if is_data_ready(snap):
                     epd.init()
-                    img = render_image(snap)
-                    epd.display(epd.getbuffer(img), red_buffer)
+                    img_b, img_r = render_image(snap)
+                    epd.display(epd.getbuffer(img_b), epd.getbuffer(img_r))
                     epd.sleep()
                     
                     first_ready_displayed = True
@@ -447,8 +470,8 @@ def main():
                 
                 if (not no_neighbor_displayed) and ((now_mono - boot_start_mono) >= NO_NEIGHBOR_TIMEOUT_SECONDS):
                     epd.init()
-                    img = render_no_neighbor()
-                    epd.display(epd.getbuffer(img), red_buffer)
+                    img_b, img_r = render_no_neighbor()
+                    epd.display(epd.getbuffer(img_b), epd.getbuffer(img_r))
                     epd.sleep()
                     
                     no_neighbor_displayed = True
@@ -460,16 +483,16 @@ def main():
                 continue
                 
             if last_displayed_snap is not None and snap != last_displayed_snap:
-                # Give it at least 15-20 seconds between updates since the hardware is slow
+                # 3-color displays are slow, ensure we don't spam it while it's still flashing
                 if (now_mono - last_display_update_mono) < 20.0:
                     continue
                 
                 log.info("Data change detected: Full refresh starting (Takes ~15s)...")
                 epd.init()
-                img = render_image(snap)
+                img_b, img_r = render_image(snap)
                 
-                # Full refresh with Black and Red buffers
-                epd.display(epd.getbuffer(img), red_buffer)
+                # Push both layers to the screen
+                epd.display(epd.getbuffer(img_b), epd.getbuffer(img_r))
                 epd.sleep()
                 
                 last_display_update_mono = now_mono
@@ -487,3 +510,6 @@ def main():
         except Exception:
             pass
         raise
+
+if __name__ == "__main__":
+    main()
