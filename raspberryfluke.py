@@ -10,52 +10,28 @@ from waveshare_epd import epd2in13_V3
 # ============================================================
 # -------------------- CONFIGURATION -------------------------
 # ============================================================
-
-# Physical resolution of the Waveshare 2.13" V3 e-paper panel.
 DISPLAY_WIDTH = 250
 DISPLAY_HEIGHT = 122
-
-# Layout margins for text placement.
 LEFT_MARGIN = 10
 TOP_MARGIN = 4
 
-# Font sizing rules.
-# Five lines must fit vertically, so the base size is intentionally smaller.
-BASE_FONT_SIZE = 14
+# Slightly larger font since we combined VLANs (4 lines total)
+BASE_FONT_SIZE = 16
 MIN_FONT_SIZE = 10
-LINE_SPACING = 2  # Extra pixels between lines.
+LINE_SPACING = 2
 
-# Path to system font used for rendering text.
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-
-# The only wired interface on the RaspberryFluke.
 IFACE = "eth0"
 
-# -------------------- Polling / Timing ----------------------
-
-# Background polling frequency for LLDP/CDP updates.
 POLL_INTERVAL_SECONDS = 1
-
-# Timeout for subprocess calls to prevent hanging indefinitely.
 SUBPROCESS_TIMEOUT_SECONDS = 3
-
-# Maximum time to remain on "Loading" before displaying a "NO NEIGHBOR" screen.
-# This accounts for slow CDP environments (e.g., 45–90 seconds observed).
 NO_NEIGHBOR_TIMEOUT_SECONDS = 180
-
-# Minimum time between display refreshes once monitoring VLAN changes.
-# This protects the e-paper panel if VLAN rapidly flaps.
 MIN_DISPLAY_UPDATE_INTERVAL_SECONDS = 10
-
-# -------------------- E-Paper Hygiene -----------------------
-
-# After this many partial refreshes, force a full refresh to prevent ghosting.
 PARTIAL_REFRESH_LIMIT = 8
 
 # ============================================================
 # -------------------- LOGGING -------------------------------
 # ============================================================
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s"
@@ -65,8 +41,6 @@ log = logging.getLogger("raspberryfluke")
 # ============================================================
 # -------------------- FONT PRELOAD / CACHE ------------------
 # ============================================================
-
-# Preload all font sizes once at startup to avoid disk I/O on each render.
 FONT_CACHE = {
     s: ImageFont.truetype(FONT_PATH, s)
     for s in range(MIN_FONT_SIZE, BASE_FONT_SIZE + 1)
@@ -75,60 +49,29 @@ FONT_CACHE = {
 # ============================================================
 # -------------------- SHARED STATE --------------------------
 # ============================================================
-
-# Shared tuple containing the most recently collected data.
-# Format: (switch_name, switch_ip, port_name, vlan_id, voice_vlan_id)
-current_data = ("Loading", "...", "...", "...", "...")
-
-# Lock protects access to current_data between threads.
+# FIXED: Now 7 items to match (SW, IP, PORT, NATIVE, VOICE, SPEED, DESC)
+current_data = ("Loading", "...", "...", "...", "...", "...", "...")
 data_lock = threading.Lock()
-
-# Event used to notify the display loop when new data is available.
 data_event = threading.Event()
-
-# Event used to signal clean shutdown.
 shutdown_event = threading.Event()
 
 # ============================================================
 # -------------------- UTILITY FUNCTIONS ---------------------
 # ============================================================
-
 def run(cmd):
-    """
-    Execute a subprocess command safely with a timeout.
-
-    Any failure returns an empty string, and errors are logged for diagnostics.
-    """
     try:
         return subprocess.check_output(
             cmd,
             stderr=subprocess.DEVNULL,
             timeout=SUBPROCESS_TIMEOUT_SECONDS,
         ).decode("utf-8", errors="ignore").strip()
-    except subprocess.TimeoutExpired:
-        log.warning("Command timeout: %s", cmd)
-        return ""
-    except FileNotFoundError:
-        log.error("Command not found: %s", cmd)
-        return ""
-    except subprocess.CalledProcessError:
-        log.warning("Command failed: %s", cmd)
-        return ""
     except Exception:
-        log.exception("Unexpected subprocess error: %s", cmd)
         return ""
 
 def clean_hostname(name):
-    """
-    Remove domain suffix from a hostname.
-    Example: switch.domain.local -> switch
-    """
     return name.split(".")[0] if "." in name else name
 
 def shorten_interface(intf):
-    """
-    Shorten long Cisco-style interface names so they fit cleanly on the display.
-    """
     replacements = {
         "GigabitEthernet": "Gi",
         "TenGigabitEthernet": "Te",
@@ -140,9 +83,6 @@ def shorten_interface(intf):
     return intf
 
 def fit_font(draw, text, max_width):
-    """
-    Select the largest preloaded font size that fits within max_width.
-    """
     for size in range(BASE_FONT_SIZE, MIN_FONT_SIZE - 1, -1):
         font = FONT_CACHE[size]
         if draw.textlength(text, font=font) <= max_width:
@@ -150,165 +90,87 @@ def fit_font(draw, text, max_width):
     return FONT_CACHE[MIN_FONT_SIZE]
 
 def _first_value_for_keys(kv, keys):
-    """
-    Return the first non-empty value found in kv for a list of possible keys.
-    """
     for k in keys:
         v = kv.get(k, "")
-        if v:
-            return v
+        if v: return v
     return ""
 
 def _find_first_match_value(kv, pattern):
-    """
-    Return the first value whose key matches the given regex pattern.
-    """
     rx = re.compile(pattern)
     for k, v in kv.items():
-        if rx.search(k) and v:
-            return v
+        if rx.search(k) and v: return v
     return ""
 
 def _normalize_vlan(v):
-    """
-    Normalize VLAN values to a simple numeric string when possible.
-    """
     v = (v or "").strip()
-    if not v:
-        return "N/A"
-
-    # Some outputs may include extra words; pull the first integer.
+    if not v: return "N/A"
     m = re.search(r"\b(\d{1,4})\b", v)
-    if m:
-        return m.group(1)
-
-    return v
+    return m.group(1) if m else v
 
 # ============================================================
 # -------------------- DISCOVERY PARSING ---------------------
 # ============================================================
-
 def parse_lldp_keyvalue():
-    """
-    Query lldpctl in keyvalue format and return a dictionary of key/value pairs.
-
-    Notes:
-    - This includes LLDP and (when enabled) CDP information as normalized by lldpd.
-    - Key naming varies slightly by lldpd version and which TLVs the switch advertises.
-    """
     kv = {}
     out = run(["lldpctl", "-f", "keyvalue"])
-    if not out:
-        return kv
-
+    if not out: return kv
     for line in out.splitlines():
-        if "=" not in line:
-            continue
+        if "=" not in line: continue
         k, v = line.split("=", 1)
         kv[k.strip()] = v.strip()
-
     return kv
 
 def extract_switch_hostname(kv):
-    """
-    Extract the switch/system name from chassis name.
-    """
     sw = kv.get(f"lldp.{IFACE}.chassis.name", "")
-    sw = clean_hostname(sw) if sw else "N/A"
-    return sw
+    return clean_hostname(sw) if sw else "N/A"
 
 def extract_switch_ip(kv):
-    """
-    Extract the switch management IP address.
-
-    LLDP advertises management addresses via the "Management Address TLV".
-    In lldpctl keyvalue output, this is typically exposed via keys containing:
-      - chassis.mgmt-ip
-      - chassis.mgmt-ip.<index>  (if multiple addresses are present)
-
-    If the switch doesn't advertise a management address, this will be N/A.
-    """
-    # Common/likely candidates (some lldpd versions use indexed keys).
     candidates = [
         f"lldp.{IFACE}.chassis.mgmt-ip",
         f"lldp.{IFACE}.chassis.mgmt-ip.0",
         f"lldp.{IFACE}.chassis.mgmt-ip.1",
     ]
     ip = _first_value_for_keys(kv, candidates)
-
-    # More flexible: any key like lldp.eth0.chassis.mgmt-ip.<anything>
     if not ip:
         ip = _find_first_match_value(kv, rf"^lldp\.{re.escape(IFACE)}\.chassis\.mgmt-ip(\.|$)")
-
-    # Basic validation: prefer something that looks like IPv4/IPv6.
     ip = (ip or "").strip()
-    if not ip:
-        return "N/A"
-    return ip
+    return ip if ip else "N/A"
 
 def extract_port(kv):
-    """
-    Extract the port/interface name.
-    """
     port = kv.get(f"lldp.{IFACE}.port.ifname", "") or kv.get(f"lldp.{IFACE}.port.descr", "")
-    port = shorten_interface(port) if port else "N/A"
-    return port
+    return shorten_interface(port) if port else "N/A"
 
 def extract_port_speed(kv):
-    """ Extract port speed (e.g., 1000Mbps -> 1G) """
     speed = kv.get(f"lldp.{IFACE}.port.speed", "")
     if speed:
-        # Convert 1000 to 1G, 10000 to 10G
         if speed == "1000": return "1G"
         if speed == "10000": return "10G"
         return f"{speed}M"
     return "N/A"
 
 def extract_port_description(kv):
-    """ Extract the administrative port description """
     descr = kv.get(f"lldp.{IFACE}.port.descr", "").strip()
-    if not descr:
-        return "N/A"
+    if not descr: return "N/A"
     return (descr[:20] + "...") if len(descr) > 20 else descr
 
 def extract_native_vlan(kv):
-    """
-    STRICTLY look for the Port VLAN (PVID).
-    Explicitly ignores MED/CDP policy keys to prevent collision with Voice VLANs.
-    """
-    # Check standard location first
     val = kv.get(f"lldp.{IFACE}.vlan.vlan-id", "")
-    
-    # Fallback to secondary location if primary is missing
     if not val:
         val = kv.get(f"lldp.{IFACE}.port.vlan-id", "")
-        
     return _normalize_vlan(val)
 
 def extract_voice_vlan(kv):
-    """
-    EXHAUSTIVE search for Voice VLAN. 
-    Prioritizes LLDP-MED (Arista/Juniper) then falls back to Cisco CDP/Aux, 
-    finally using human-readable parsing as a last resort.
-    """
-    # 1. LLDP-MED & Application Policy search (Arista/Juniper/Standard)
-    # The '.*' handles dynamic indices like 'med.policy.0...'
     patterns = [
         rf"^lldp\.{re.escape(IFACE)}\..*med\.policy.*(voice|application).*vlan",
         rf"^lldp\.{re.escape(IFACE)}\..*med\.policy.*vlan-id"
     ]
-    
     for p in patterns:
         v = _find_first_match_value(kv, p)
-        if v:
-            return _normalize_vlan(v)
+        if v: return _normalize_vlan(v)
             
-    # 2. Cisco/CDP Legacy/Compatibility search
     v = _find_first_match_value(kv, rf"^lldp\.{re.escape(IFACE)}\..*(cdp|aux).*(voice|vlan)")
-    if v:
-        return _normalize_vlan(v)
-
-    # 3. Fallback: Parse human-readable lldpctl output (The Court of Last Resort)
+    if v: return _normalize_vlan(v)
+    
     out = run(["lldpctl"])
     if out:
         patterns = [
@@ -319,9 +181,7 @@ def extract_voice_vlan(kv):
         ]
         for p in patterns:
             m = re.search(p, out, flags=re.IGNORECASE)
-            if m:
-                return _normalize_vlan(m.group(1))
-                
+            if m: return _normalize_vlan(m.group(1))
     return "N/A"
 
 def get_switch_info():
@@ -337,7 +197,6 @@ def get_switch_info():
 
 def is_data_ready(data):
     sw, sw_ip, port, vlan, voice, speed, descr = data
-    # Keep your existing checks, but just ensure you're referencing the right index
     if sw in ("Loading", "N/A", ""): return False
     if port in ("...", "N/A", ""): return False
     return True
@@ -345,50 +204,38 @@ def is_data_ready(data):
 # ============================================================
 # -------------------- BACKGROUND POLLER ---------------------
 # ============================================================
-
 def data_collector():
-    """
-    Continuously poll for updated LLDP/CDP information.
-    When data changes, update shared state and signal the display loop.
-    """
     global current_data
     last = None
-
     while not shutdown_event.is_set():
         new_data = get_switch_info()
-
         with data_lock:
             if new_data != current_data:
                 current_data = new_data
                 data_event.set()
-
         if last != new_data:
-            log.info("Data update: SW=%s SWIP=%s PORT=%s VLAN=%s VOICE=%s", *new_data)
+            # FIXED: 7 format placeholders for the 7 variables
+            log.info("Data update: SW=%s IP=%s PORT=%s VLAN=%s VOICE=%s SPEED=%s DESC=%s", *new_data)
             last = new_data
-
         time.sleep(POLL_INTERVAL_SECONDS)
 
 # ============================================================
 # -------------------- DISPLAY RENDERING ---------------------
 # ============================================================
-
 def render_image(data):
-    # Data index: 0:SW, 1:IP, 2:PORT, 3:NATIVE, 4:VOICE, 5:SPEED, 6:DESC
     image = Image.new("1", (DISPLAY_WIDTH, DISPLAY_HEIGHT), 255)
     draw = ImageDraw.Draw(image)
     
-    # 1. Merge VLANs: "VLAN: <NATIVE> | V-V: <VOICE>"
     vlan_str = f"VLAN: {data[3]}"
     if data[4] != "N/A" and data[4] != data[3]:
         vlan_str += f" | V-V: {data[4]}"
     
-    # 2. Prepare all lines for the display
     lines = [
         f"SW: {data[0]}",
         f"IP: {data[1]}",
-        f"P: {data[2]} ({data[5]})",  # Port + Speed
-        f"D: {data[6]}",              # Description
-        vlan_str,                     # Merged VLAN line
+        f"P: {data[2]} ({data[5]})", 
+        f"D: {data[6]}",              
+        vlan_str,                     
     ]
     
     y = TOP_MARGIN
@@ -402,19 +249,13 @@ def render_image(data):
     return image.rotate(180)
 
 def render_no_neighbor():
-    """
-    Render a display indicating that no neighbor has been learned after timeout.
-    """
-    return render_image(("NO NEIGHBOR", "N/A", "N/A", "N/A", "N/A"))
+    # FIXED: 7 "N/A" items instead of 5
+    return render_image(("NO NEIGHBOR", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"))
 
 # ============================================================
 # -------------------- SIGNAL HANDLING -----------------------
 # ============================================================
-
 def handle_shutdown(signum, frame):
-    """
-    Signal handler for clean shutdown (SIGTERM / SIGINT).
-    """
     log.info("Shutdown requested (signal %s)", signum)
     shutdown_event.set()
     data_event.set()
@@ -422,42 +263,35 @@ def handle_shutdown(signum, frame):
 # ============================================================
 # -------------------- MAIN SERVICE LOOP ---------------------
 # ============================================================
-
 def main():
     signal.signal(signal.SIGTERM, handle_shutdown)
     signal.signal(signal.SIGINT, handle_shutdown)
-
     epd = epd2in13_V3.EPD()
-
     partial_refresh_count = 0
     last_display_update_mono = 0.0
-
     first_ready_displayed = False
     no_neighbor_displayed = False
     boot_start_mono = time.monotonic()
     last_displayed_vlan = None
     last_displayed_voice_vlan = None
-
+    
     try:
-        # Initial boot screen (full refresh).
         epd.init()
         epd.Clear(0xFF)
-        boot_img = render_image(("Loading", "...", "...", "...", "..."))
+        # FIXED: 7 items instead of 5
+        boot_img = render_image(("Loading", "...", "...", "...", "...", "...", "..."))
         epd.display(epd.getbuffer(boot_img))
         log.info("Displayed boot screen (Loading)")
-
+        
         threading.Thread(target=data_collector, daemon=True).start()
-
+        
         while not shutdown_event.is_set():
             data_event.wait(timeout=1.0)
             data_event.clear()
-
             with data_lock:
                 snap = current_data
-
             now_mono = time.monotonic()
-
-            # If we have not yet learned a neighbor, keep showing Loading until timeout.
+            
             if not first_ready_displayed:
                 if is_data_ready(snap):
                     epd.init()
@@ -465,49 +299,39 @@ def main():
                     img = render_image(snap)
                     epd.display(epd.getbuffer(img))
                     epd.sleep()
-
                     first_ready_displayed = True
                     no_neighbor_displayed = False
                     last_displayed_vlan = snap[3]
                     last_displayed_voice_vlan = snap[4]
                     partial_refresh_count = 0
                     last_display_update_mono = now_mono
-
-                    log.info("First neighbor displayed. Now monitoring VLAN changes.")
+                    log.info("First neighbor displayed. Now monitoring changes.")
                     continue
-
                 if (not no_neighbor_displayed) and ((now_mono - boot_start_mono) >= NO_NEIGHBOR_TIMEOUT_SECONDS):
                     epd.init()
                     epd.Clear(0xFF)
                     img = render_no_neighbor()
                     epd.display(epd.getbuffer(img))
                     epd.sleep()
-
                     no_neighbor_displayed = True
                     partial_refresh_count = 0
                     last_display_update_mono = now_mono
-
                     log.warning("No neighbor after %ss; displayed NO NEIGHBOR screen.", NO_NEIGHBOR_TIMEOUT_SECONDS)
-
                 continue
-
-            # After initial display, update only when VLAN or VOICE VLAN changes.
+                
             if not is_data_ready(snap):
                 continue
-
+                
             current_vlan = snap[3]
             current_voice = snap[4]
-
             vlan_changed = (last_displayed_vlan is not None and current_vlan != last_displayed_vlan)
             voice_changed = (last_displayed_voice_vlan is not None and current_voice != last_displayed_voice_vlan)
-
+            
             if vlan_changed or voice_changed:
                 if (now_mono - last_display_update_mono) < MIN_DISPLAY_UPDATE_INTERVAL_SECONDS:
                     continue
-
                 epd.init()
                 img = render_image(snap)
-
                 if partial_refresh_count >= PARTIAL_REFRESH_LIMIT:
                     epd.Clear(0xFF)
                     epd.display(epd.getbuffer(img))
@@ -523,20 +347,16 @@ def main():
                         epd.display(epd.getbuffer(img))
                         partial_refresh_count = 0
                         log.warning("Partial refresh failed; full refresh used.", exc_info=True)
-
                 epd.sleep()
-
                 last_displayed_vlan = current_vlan
                 last_displayed_voice_vlan = current_voice
                 last_display_update_mono = now_mono
-
-        # Clean shutdown.
+                
         try:
             epd.sleep()
         except Exception:
             pass
         log.info("Exited cleanly.")
-
     except Exception:
         try:
             epd.sleep()
