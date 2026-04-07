@@ -178,3 +178,37 @@ sudo systemctl status raspberryfluke.service
 ```
 
 The RaspberryFluke script will now run automatically each time the device boots.
+
+---
+
+## EXTRA
+
+If the last status check throws an error and you are using the latest RaspberryPiOS-Lite x64 you may need the default font packages for the ePaper display to work properly.
+
+```bash
+sudo apt install fonts-dejavu fonts-liberation fonts-freefont-ttf -y
+```
+
+---
+
+## Even Lighter
+
+Make the PiOS-Lite a bit quicker to boot
+
+```bash
+sudo nano /boot/firmware/config.txt
+```
+Disable Audio, Disable Bluetooth (if you only use SSH over WiFi/Ethernet), Give minimum RAM to the GPU (you don't need a GPU for SPI e-paper)
+```text
+dtparam=audio=off
+dtoverlay=disable-bt
+gpu_mem=16
+```
+Disable background services (few may not be running but try anyway)
+```bash
+sudo systemctl disable triggerhappy.service
+sudo systemctl disable avahi-daemon.service
+sudo systemctl disable bluetooth.service
+sudo systemctl disable hciuart.service
+sudo systemctl disable keyboard-setup.service
+```
