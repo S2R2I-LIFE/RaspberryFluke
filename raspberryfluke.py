@@ -140,11 +140,41 @@ def extract_port(kv):
     return shorten_interface(port) if port else "N/A"
 
 def extract_port_speed(kv):
+    """ Extract port speed from MAC/PHY MAU Type or simple speed keys """
+    
+    # Helper to convert raw strings (like '1000BASE-T') into short labels ('1G')
+    def format_speed(val):
+        val = val.lower()
+        if "10000" in val or "10gbase" in val: return "10G"
+        if "1000base" in val or val == "1000" or "1g" in val: return "1G"
+        if "100base" in val or val == "100": return "100M"
+        if "10base" in val or val == "10": return "10M"
+        if "2500" in val or "2.5g" in val: return "2.5G"
+        if "5000" in val or "5g" in val: return "5G"
+        if "40g" in val: return "40G"
+        if "100g" in val: return "100G"
+        return None
+
+    # 1. Check basic Key-Value (if supported by switch)
     speed = kv.get(f"lldp.{IFACE}.port.speed", "")
     if speed:
-        if speed == "1000": return "1G"
-        if speed == "10000": return "10G"
-        return f"{speed}M"
+        fmt = format_speed(speed)
+        if fmt: return fmt
+
+    # 2. Check Key-Value for MAC/PHY MAU type
+    mau_key = _find_first_match_value(kv, rf"^lldp\.{re.escape(IFACE)}\.mac\.mau")
+    if mau_key:
+        fmt = format_speed(mau_key)
+        if fmt: return fmt
+
+    # 3. Fallback to human-readable output (Parses 'Operational MAU Type : 1000BASE-T')
+    out = run(["lldpctl"])
+    if out:
+        m = re.search(r"Operational MAU Type\s*:\s*([A-Za-z0-9\-]+)", out, flags=re.IGNORECASE)
+        if m:
+            fmt = format_speed(m.group(1))
+            if fmt: return fmt
+
     return "N/A"
 
 def extract_port_description(kv):
