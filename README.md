@@ -57,8 +57,8 @@ OS: JUNOS 21.4R3-S2.4
 - 40-pin male GPIO Header
 - Waveshare PoE Ethernet / USB HUB BOX (SKU 20895)
 - Tested displays:
-    Waveshare 2.13" E-Paper HAT+ display (SKU 27467)
-    Waveshare 2.13" E-Paper HAT (B), 250x122, Red/Black/White, SPI (SKU 13448)
+    - Waveshare 2.13" E-Paper HAT+ display (SKU 27467)
+    - Waveshare 2.13" E-Paper HAT (B), 250x122, Red/Black/White, SPI (SKU 13448)
 
 
 ---
