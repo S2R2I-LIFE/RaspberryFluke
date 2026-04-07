@@ -433,6 +433,14 @@ def render_no_neighbor():
     return render_image(("NO NEIGHBOR", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"))
 
 # ============================================================
+# -------------------- SIGNAL HANDLING -----------------------
+# ============================================================
+def handle_shutdown(signum, frame):
+    log.info("Shutdown requested (signal %s)", signum)
+    shutdown_event.set()
+    data_event.set()
+
+# ============================================================
 # -------------------- MAIN SERVICE LOOP ---------------------
 # ============================================================
 def main():
