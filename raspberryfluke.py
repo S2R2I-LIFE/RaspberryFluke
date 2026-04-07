@@ -15,7 +15,7 @@ DISPLAY_HEIGHT = 122
 LEFT_MARGIN = 10
 TOP_MARGIN = 4
 
-BASE_FONT_SIZE = 16
+BASE_FONT_SIZE = 14
 MIN_FONT_SIZE = 10
 LINE_SPACING = 2
 
@@ -182,68 +182,95 @@ def extract_port_description(kv):
     if not descr: return "N/A"
     return (descr[:20] + "...") if len(descr) > 20 else descr
 
-def extract_voice_vlan(kv):
-    # 1. Standard LLDP-MED and CDP checks
+def extract_native_vlan(kv):
+    """
+    Finds the Native VLAN by hunting exclusively for the PVID flag.
+    """
+    # 1. Search the keys for the PVID flag (e.g., lldp.eth0.vlan.pvid=yes)
+    for k, v in kv.items():
+        if "pvid" in k.lower():
+            # If the value is a number (e.g., pvid=1100)
+            if v.isdigit(): 
+                return _normalize_vlan(v)
+            # If the value is 'yes'/'true', swap 'pvid' for 'vlan-id' in the key string
+            # (e.g., 'lldp.eth0.vlan.0.pvid' -> 'lldp.eth0.vlan.0.vlan-id')
+            id_key = k.replace("pvid", "vlan-id")
+            if id_key in kv: 
+                return _normalize_vlan(kv[id_key])
+
+    # 2. Fallback to human-readable text
+    out = run(["lldpctl"])
+    if out:
+        for line in out.splitlines():
+            # Look for lines containing both PVID and a number
+            if "pvid" in line.lower():
+                m = re.search(r"\b(\d{1,4})\b", line)
+                if m: return _normalize_vlan(m.group(1))
+
+    # 3. Generic fallback if PVID is totally missing
+    for k, val in kv.items():
+        if "vlan-id" in k and "med" not in k and "voice" not in k:
+            return _normalize_vlan(val)
+            
+    return "N/A"
+
+def extract_voice_vlan(kv, known_native="N/A"):
+    """
+    Finds the Voice VLAN by looking for standard voice labels, LLDP-MED policies,
+    or by using Process of Elimination against the known Native VLAN.
+    """
+    # 1. Standard LLDP-MED and CDP policies (Now catches .vid and .vlan-id)
     patterns = [
-        rf"^lldp\.{re.escape(IFACE)}\..*med\.policy.*(voice|application).*vlan",
+        rf"^lldp\.{re.escape(IFACE)}\..*med\.policy.*(voice|application).*(vlan-id|vid|vlan)",
+        rf"^lldp\.{re.escape(IFACE)}\..*med\.policy.*(vlan-id|vid|vlan\.vid)",
         rf"^lldp\.{re.escape(IFACE)}\..*(cdp|aux).*(voice|vlan)"
     ]
     for p in patterns:
         v = _find_first_match_value(kv, p)
-        if v: return _normalize_vlan(v)
+        if v: 
+            v_norm = _normalize_vlan(v)
+            if v_norm != known_native: return v_norm
 
-    # 2. SMART CHECK: Look for 802.1Q VLANs explicitly named "Voice"
-    # Some Arista switches just send standard VLANs with the name "Voice"
-    # e.g., lldp.eth0.vlan.1.vlan-name = Voice -> find lldp.eth0.vlan.1.vlan-id
+    # 2. Check for explicit VLAN Names (e.g., vlan-name = Voice)
     for k, v in kv.items():
         if "vlan-name" in k and "voice" in v.lower():
-            # Swap 'vlan-name' for 'vlan-id' in the key to grab the actual number
-            id_key = k.replace("vlan-name", "vlan-id")
-            if id_key in kv:
-                return _normalize_vlan(kv[id_key])
+            # Handle both naming conventions just in case
+            id_key1 = k.replace("vlan-name", "vlan-id")
+            id_key2 = k.replace("vlan-name", "vid")
+            if id_key1 in kv: return _normalize_vlan(kv[id_key1])
+            if id_key2 in kv: return _normalize_vlan(kv[id_key2])
 
-    # 3. Fallback to human-readable 'lldpctl' text
+    # 3. *** PROCESS OF ELIMINATION ***
+    # If there are exactly two VLANs on the port, and we already know 
+    # which one is Native, the other one MUST be the Voice VLAN.
+    other_vlans = []
+    for k, val in kv.items():
+        # Catch any key that denotes a VLAN ID
+        if "vlan-id" in k or ".vid" in k or re.search(rf"^lldp\.{re.escape(IFACE)}\.vlan\.", k):
+            norm = _normalize_vlan(val)
+            if norm and norm != "N/A" and norm != known_native:
+                if norm not in other_vlans:
+                    other_vlans.append(norm)
+    
+    # Only assign via elimination if there is exactly 1 extra VLAN found
+    if len(other_vlans) == 1:
+        return other_vlans[0]
+
+    # 4. Text fallback
     out = run(["lldpctl"])
     if out:
         patterns = [
             r"Voice\s+VLAN\s*:\s*(\d{1,4})",
             r"Auxiliary\s+VLAN\s*:\s*(\d{1,4})",
             r"Application\s+VLAN\s*:\s*(\d{1,4})",
-            # Matches strings like: "VLAN: 1180 (Voice)"
-            r"VLAN\s*:\s*(\d{1,4})\s*\(.*?(?:voice|aux).*?\)" 
+            r"VLAN\s*:\s*(\d{1,4})\s*\(.*?(?:voice|aux).*?\)"
         ]
         for p in patterns:
             m = re.search(p, out, flags=re.IGNORECASE)
-            if m: return _normalize_vlan(m.group(1))
-            
-    return "N/A"
-
-def extract_native_vlan(kv, known_voice="N/A"):
-    # 1. PVID (Port VLAN ID) is the absolute truth for Native VLANs
-    v = _find_first_match_value(kv, rf"^lldp\.{re.escape(IFACE)}\.port\.pvid")
-    if v: return _normalize_vlan(v)
-
-    # 2. Check the raw human-readable output specifically for "pvid: yes"
-    # lldpctl usually formats Native VLANs as -> "VLAN: 1100, pvid: yes"
-    out = run(["lldpctl"])
-    if out:
-        m = re.search(r"VLAN\s*:\s*(\d+).*?pvid\s*:\s*yes", out, flags=re.IGNORECASE)
-        if m: return _normalize_vlan(m.group(1))
-
-    # 3. Generic Key-Value fallback (Only if PVID is totally missing)
-    candidates = []
-    for k, val in kv.items():
-        if "vlan-id" in k or re.search(rf"^lldp\.{re.escape(IFACE)}\.vlan\.", k):
-            if "med.policy" not in k and "voice" not in k and "cdp" not in k:
-                norm = _normalize_vlan(val)
-                if norm and norm != "N/A":
-                    candidates.append(norm)
-
-    # Remove the Voice VLAN from our list of candidates to prevent overlap
-    candidates = [c for c in candidates if c != known_voice]
-    if candidates:
-        return candidates[0]
-        
+            if m: 
+                v_norm = _normalize_vlan(m.group(1))
+                if v_norm != known_native: return v_norm
+                
     return "N/A"
 
 def get_switch_info():
