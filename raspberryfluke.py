@@ -197,22 +197,28 @@ def extract_port_description(kv):
 def extract_poe(kv):
     """
     Extract PoE power allocation, convert from milliwatts to Watts.
+    Ignores keys that report '0' to ensure we find the actual allocated power.
     """
-    power_str = _find_first_match_value(kv, rf"^lldp\.{re.escape(IFACE)}\.port\.power\.allocated")
-    if not power_str:
-        power_str = _find_first_match_value(kv, rf"^lldp\.{re.escape(IFACE)}\.port\.power\.requested")
-    if not power_str:
-        power_str = _find_first_match_value(kv, rf"^lldp\.{re.escape(IFACE)}\.med\.power\.allocated")
-    if not power_str:
-        power_str = _find_first_match_value(kv, rf"^lldp\.{re.escape(IFACE)}\.lldp-med\.poe\.power")
-
-    if power_str:
-        try:
-            watts = float(power_str) / 1000.0
-            return f"{watts:.1f}W"
-        except ValueError:
-            pass
-            
+    patterns = [
+        rf"^lldp\.{re.escape(IFACE)}\.port\.power\.allocated",
+        rf"^lldp\.{re.escape(IFACE)}\.port\.power\.requested",
+        rf"^lldp\.{re.escape(IFACE)}\.med\.power\.allocated",
+        rf"^lldp\.{re.escape(IFACE)}\.lldp-med\.poe\.power"
+    ]
+    
+    for p in patterns:
+        power_str = _find_first_match_value(kv, p)
+        if power_str:
+            try:
+                # Convert mW to W (e.g., 2200 -> 2.2)
+                watts = float(power_str) / 1000.0
+                
+                # Only accept it if it's actually drawing power
+                if watts > 0:
+                    return f"{watts:.1f}W"
+            except ValueError:
+                pass
+                
     return "N/A"
 
 def extract_vlans(kv):
