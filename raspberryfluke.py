@@ -15,7 +15,7 @@ DISPLAY_HEIGHT = 122
 LEFT_MARGIN = 10
 TOP_MARGIN = 4
 
-BASE_FONT_SIZE = 16
+BASE_FONT_SIZE = 12
 MIN_FONT_SIZE = 10
 LINE_SPACING = 2
 
@@ -48,7 +48,8 @@ FONT_CACHE = {
 # ============================================================
 # -------------------- SHARED STATE --------------------------
 # ============================================================
-current_data = ("Loading", "...", "...", "...", "...", "...", "...")
+# 8 Items: (SW, IP, PORT, NATIVE, VOICE, SPEED, DESC, POE)
+current_data = ("Loading", "...", "...", "...", "...", "...", "...", "...")
 data_lock = threading.Lock()
 data_event = threading.Event()
 shutdown_event = threading.Event()
@@ -109,13 +110,30 @@ def _normalize_vlan(v):
 # -------------------- DISCOVERY PARSING ---------------------
 # ============================================================
 def parse_lldp_keyvalue():
+    """
+    Parses lldpctl output into a dictionary. 
+    Includes a deduplication trick to handle Juniper switches that output 
+    duplicate keys without indices (e.g., multiple 'vlan.vlan-id' keys).
+    """
     kv = {}
     out = run(["lldpctl", "-f", "keyvalue"])
     if not out: return kv
+    
+    k_counts = {}
     for line in out.splitlines():
         if "=" not in line: continue
         k, v = line.split("=", 1)
-        kv[k.strip()] = v.strip()
+        k = k.strip()
+        v = v.strip()
+        
+        # Prevent Python from overwriting Native VLAN with Voice VLAN
+        if k not in k_counts:
+            k_counts[k] = 0
+            kv[k] = v
+        else:
+            k_counts[k] += 1
+            kv[f"{k}._{k_counts[k]}"] = v
+            
     return kv
 
 def extract_switch_hostname(kv):
@@ -152,19 +170,16 @@ def extract_port_speed(kv):
         if "100g" in val: return "100G"
         return None
 
-    # 1. Direct Key-Value lookup
     speed = kv.get(f"lldp.{IFACE}.port.speed", "")
     if speed:
         fmt = format_speed(speed)
         if fmt: return fmt
 
-    # 2. MAU (Hardware) Type lookup
     mau_key = _find_first_match_value(kv, rf"^lldp\.{re.escape(IFACE)}\.mac\.mau")
     if mau_key:
         fmt = format_speed(mau_key)
         if fmt: return fmt
 
-    # 3. Fallback to CLI text parsing
     out = run(["lldpctl"])
     if out:
         m = re.search(r"Operational MAU Type\s*:\s*([A-Za-z0-9\-]+)", out, flags=re.IGNORECASE)
@@ -179,95 +194,123 @@ def extract_port_description(kv):
     if not descr: return "N/A"
     return (descr[:20] + "...") if len(descr) > 20 else descr
 
-def extract_native_vlan(kv):
-    # 1. Check for explicit PVID flags (handles Cisco and Juniper formats)
-    for k, v in kv.items():
-        if "pvid" in k.lower():
-            if v.isdigit(): 
-                return _normalize_vlan(v)
-            id_key = k.replace("pvid", "vlan-id")
-            id_key2 = k.replace("pvid", "vid")
-            if id_key in kv: return _normalize_vlan(kv[id_key])
-            if id_key2 in kv: return _normalize_vlan(kv[id_key2])
+def extract_poe(kv):
+    """
+    Extract PoE power allocation, convert from milliwatts to Watts.
+    """
+    power_str = _find_first_match_value(kv, rf"^lldp\.{re.escape(IFACE)}\.port\.power\.allocated")
+    if not power_str:
+        power_str = _find_first_match_value(kv, rf"^lldp\.{re.escape(IFACE)}\.port\.power\.requested")
+    if not power_str:
+        power_str = _find_first_match_value(kv, rf"^lldp\.{re.escape(IFACE)}\.med\.power\.allocated")
+    if not power_str:
+        power_str = _find_first_match_value(kv, rf"^lldp\.{re.escape(IFACE)}\.lldp-med\.poe\.power")
 
-    # 2. Fallback to text PVID formatting
-    out = run(["lldpctl"])
-    if out:
-        for line in out.splitlines():
-            if "pvid" in line.lower():
-                m = re.search(r"\b(\d{1,4})\b", line)
-                if m: return _normalize_vlan(m.group(1))
-
-    # 3. Generic fallback
-    for k, val in kv.items():
-        if ("vlan-id" in k or ".vid" in k) and "med" not in k and "voice" not in k:
-            return _normalize_vlan(val)
+    if power_str:
+        try:
+            watts = float(power_str) / 1000.0
+            return f"{watts:.1f}W"
+        except ValueError:
+            pass
             
     return "N/A"
 
-def extract_voice_vlan(kv, known_native="N/A"):
-    # 1. Standard LLDP-MED and CDP policies
-    patterns = [
-        rf"^lldp\.{re.escape(IFACE)}\..*med\.policy.*(voice|application).*(vlan-id|vid|vlan)",
-        rf"^lldp\.{re.escape(IFACE)}\..*med\.policy.*(vlan-id|vid|vlan\.vid)",
-        rf"^lldp\.{re.escape(IFACE)}\..*(cdp|aux).*(voice|vlan)"
-    ]
-    for p in patterns:
-        v = _find_first_match_value(kv, p)
-        if v: 
-            v_norm = _normalize_vlan(v)
-            if v_norm != known_native: return v_norm
-
-    # 2. Check for explicit VLAN Names (e.g., vlan-name = Voice)
+def extract_vlans(kv):
+    all_vlans = set()
     for k, v in kv.items():
-        if "vlan-name" in k and "voice" in str(v).lower():
-            id_key1 = k.replace("vlan-name", "vlan-id")
-            id_key2 = k.replace("vlan-name", "vid")
-            if id_key1 in kv: return _normalize_vlan(kv[id_key1])
-            if id_key2 in kv: return _normalize_vlan(kv[id_key2])
-
-    # 3. *** PROCESS OF ELIMINATION ***
-    other_vlans = []
-    for k, val in kv.items():
         if "vlan-id" in k or ".vid" in k or re.search(rf"^lldp\.{re.escape(IFACE)}\.vlan\.", k):
-            norm = _normalize_vlan(val)
-            if norm and norm != "N/A" and norm != known_native:
-                if norm not in other_vlans:
-                    other_vlans.append(norm)
-    
-    if len(other_vlans) == 1:
-        return other_vlans[0]
+            norm = _normalize_vlan(v)
+            if norm and norm != "N/A":
+                all_vlans.add(norm)
+                
+    native = None
+    voice = None
 
-    # 4. Text fallback
-    out = run(["lldpctl"])
-    if out:
+    # STRICT NATIVE (PVID)
+    for k, v in kv.items():
+        if "pvid" in k.lower():
+            if str(v).isdigit(): 
+                native = _normalize_vlan(v)
+            elif str(v).lower() in ["yes", "true", "1"]:
+                id_key1 = k.replace("pvid", "vlan-id")
+                id_key2 = k.replace("pvid", "vid")
+                if id_key1 in kv: native = _normalize_vlan(kv[id_key1])
+                elif id_key2 in kv: native = _normalize_vlan(kv[id_key2])
+                
+    if not native:
+        out = run(["lldpctl"])
+        if out:
+            for line in out.splitlines():
+                if "pvid" in line.lower():
+                    m = re.search(r"\b(\d{1,4})\b", line)
+                    if m: native = _normalize_vlan(m.group(1))
+
+    # STRICT VOICE
+    for k, v in kv.items():
+        if "apptype" in k.lower() and "voice" in str(v).lower():
+            id_key = k.replace("apptype", "vlan.vid")
+            if id_key in kv:
+                voice = _normalize_vlan(kv[id_key])
+                break
+                
+    if not voice:
         patterns = [
-            r"Voice\s+VLAN\s*:\s*(\d{1,4})",
-            r"Auxiliary\s+VLAN\s*:\s*(\d{1,4})",
-            r"Application\s+VLAN\s*:\s*(\d{1,4})",
-            r"VLAN\s*:\s*(\d{1,4})\s*\(.*?(?:voice|aux).*?\)"
+            rf"^lldp\.{re.escape(IFACE)}\..*med\.policy.*(voice|application).*(vlan-id|vid|vlan)",
+            rf"^lldp\.{re.escape(IFACE)}\..*med\.policy.*(vlan-id|vid|vlan\.vid)",
+            rf"^lldp\.{re.escape(IFACE)}\..*(cdp|aux).*(voice|vlan)"
         ]
         for p in patterns:
-            m = re.search(p, out, flags=re.IGNORECASE)
-            if m: 
-                v_norm = _normalize_vlan(m.group(1))
-                if v_norm != known_native: return v_norm
+            v_match = _find_first_match_value(kv, p)
+            if v_match: 
+                voice = _normalize_vlan(v_match)
+                break
                 
-    return "N/A"
+    if not voice:
+        for k, v in kv.items():
+            if "vlan-name" in k and "voice" in str(v).lower():
+                for suffix in ["vlan-id", "vid"]:
+                    id_key = k.replace("vlan-name", suffix)
+                    if id_key in kv:
+                        voice = _normalize_vlan(kv[id_key])
+                        break
+                        
+    if not voice:
+        out = run(["lldpctl"])
+        if out:
+            for p in [r"Voice\s+VLAN\s*:\s*(\d{1,4})", r"Auxiliary\s+VLAN\s*:\s*(\d{1,4})", r"Application\s+VLAN\s*:\s*(\d{1,4})", r"VLAN\s*:\s*(\d{1,4})\s*\(.*?(?:voice|aux).*?\)"]:
+                m = re.search(p, out, flags=re.IGNORECASE)
+                if m:
+                    voice = _normalize_vlan(m.group(1))
+                    break
+
+    # BI-DIRECTIONAL PROCESS OF ELIMINATION
+    if native and not voice:
+        others = [v for v in all_vlans if v != native]
+        if len(others) == 1: voice = others[0]
+    elif voice and not native:
+        others = [v for v in all_vlans if v != voice]
+        if len(others) == 1: native = others[0]
+
+    # ABSOLUTE FALLBACK
+    if not native and not voice and all_vlans:
+        native = sorted(list(all_vlans))[0]
+
+    return (native or "N/A", voice or "N/A")
 
 def get_switch_info():
     kv = parse_lldp_keyvalue()
     sw = extract_switch_hostname(kv)
     sw_ip = extract_switch_ip(kv)
     port = extract_port(kv)
-    vlan = extract_native_vlan(kv)
-    voice = extract_voice_vlan(kv, known_native=vlan)
     speed = extract_port_speed(kv)
     descr = extract_port_description(kv)
-    return (sw, sw_ip, port, vlan, voice, speed, descr)
+    poe = extract_poe(kv)
+    vlan, voice = extract_vlans(kv)
+    
+    return (sw, sw_ip, port, vlan, voice, speed, descr, poe)
 
 def is_data_ready(data):
-    sw, sw_ip, port, vlan, voice, speed, descr = data
+    sw, sw_ip, port, vlan, voice, speed, descr, poe = data
     if sw in ("Loading", "N/A", ""): return False
     if port in ("...", "N/A", ""): return False
     return True
@@ -286,10 +329,9 @@ def data_collector():
                     current_data = new_data
                     data_event.set()
             if last != new_data:
-                log.info("Data update: SW=%s IP=%s PORT=%s VLAN=%s VOICE=%s SPEED=%s DESC=%s", *new_data)
+                log.info("Data update: SW=%s IP=%s PORT=%s VLAN=%s VOICE=%s SPEED=%s DESC=%s POE=%s", *new_data)
                 last = new_data
         except Exception as e:
-            # THIS PREVENTS SILENT CRASHES
             log.error(f"Critical error in data collector: {e}", exc_info=True)
             
         time.sleep(POLL_INTERVAL_SECONDS)
@@ -304,6 +346,8 @@ def render_image(data):
     port_str = f"P: {data[2]}"
     if data[5] != "N/A":
         port_str += f" ({data[5]})"
+    if data[7] != "N/A":
+        port_str += f" | {data[7]}"
         
     native = data[3]
     voice = data[4]
@@ -339,7 +383,7 @@ def render_image(data):
     return image.rotate(180)
 
 def render_no_neighbor():
-    return render_image(("NO NEIGHBOR", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"))
+    return render_image(("NO NEIGHBOR", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"))
 
 # ============================================================
 # -------------------- SIGNAL HANDLING -----------------------
@@ -369,7 +413,7 @@ def main():
     try:
         epd.init()
         epd.Clear(0xFF)
-        boot_img = render_image(("Loading", "...", "...", "...", "...", "...", "..."))
+        boot_img = render_image(("Loading", "...", "...", "...", "...", "...", "...", "..."))
         epd.display(epd.getbuffer(boot_img))
         last_rendered_img = boot_img
         log.info("Displayed boot screen (Loading)")
