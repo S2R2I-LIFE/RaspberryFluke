@@ -183,65 +183,67 @@ def extract_port_description(kv):
     return (descr[:20] + "...") if len(descr) > 20 else descr
 
 def extract_voice_vlan(kv):
+    # 1. Standard LLDP-MED and CDP checks
     patterns = [
         rf"^lldp\.{re.escape(IFACE)}\..*med\.policy.*(voice|application).*vlan",
-        rf"^lldp\.{re.escape(IFACE)}\..*med\.policy.*vlan-id"
+        rf"^lldp\.{re.escape(IFACE)}\..*(cdp|aux).*(voice|vlan)"
     ]
     for p in patterns:
         v = _find_first_match_value(kv, p)
         if v: return _normalize_vlan(v)
-            
-    v = _find_first_match_value(kv, rf"^lldp\.{re.escape(IFACE)}\..*(cdp|aux).*(voice|vlan)")
-    if v: return _normalize_vlan(v)
-    
+
+    # 2. SMART CHECK: Look for 802.1Q VLANs explicitly named "Voice"
+    # Some Arista switches just send standard VLANs with the name "Voice"
+    # e.g., lldp.eth0.vlan.1.vlan-name = Voice -> find lldp.eth0.vlan.1.vlan-id
+    for k, v in kv.items():
+        if "vlan-name" in k and "voice" in v.lower():
+            # Swap 'vlan-name' for 'vlan-id' in the key to grab the actual number
+            id_key = k.replace("vlan-name", "vlan-id")
+            if id_key in kv:
+                return _normalize_vlan(kv[id_key])
+
+    # 3. Fallback to human-readable 'lldpctl' text
     out = run(["lldpctl"])
     if out:
         patterns = [
             r"Voice\s+VLAN\s*:\s*(\d{1,4})",
             r"Auxiliary\s+VLAN\s*:\s*(\d{1,4})",
             r"Application\s+VLAN\s*:\s*(\d{1,4})",
-            r"\bvoice\b.*\bVLAN\b.*?(\d{1,4})"
+            # Matches strings like: "VLAN: 1180 (Voice)"
+            r"VLAN\s*:\s*(\d{1,4})\s*\(.*?(?:voice|aux).*?\)" 
         ]
         for p in patterns:
             m = re.search(p, out, flags=re.IGNORECASE)
             if m: return _normalize_vlan(m.group(1))
+            
     return "N/A"
 
 def extract_native_vlan(kv, known_voice="N/A"):
-    # 1. PVID is the gold standard for Native VLAN
+    # 1. PVID (Port VLAN ID) is the absolute truth for Native VLANs
     v = _find_first_match_value(kv, rf"^lldp\.{re.escape(IFACE)}\.port\.pvid")
     if v: return _normalize_vlan(v)
-    
-    # 2. Collect all general VLAN keys
+
+    # 2. Check the raw human-readable output specifically for "pvid: yes"
+    # lldpctl usually formats Native VLANs as -> "VLAN: 1100, pvid: yes"
+    out = run(["lldpctl"])
+    if out:
+        m = re.search(r"VLAN\s*:\s*(\d+).*?pvid\s*:\s*yes", out, flags=re.IGNORECASE)
+        if m: return _normalize_vlan(m.group(1))
+
+    # 3. Generic Key-Value fallback (Only if PVID is totally missing)
     candidates = []
     for k, val in kv.items():
         if "vlan-id" in k or re.search(rf"^lldp\.{re.escape(IFACE)}\.vlan\.", k):
-            # Ignore explicitly named voice/med keys
             if "med.policy" not in k and "voice" not in k and "cdp" not in k:
                 norm = _normalize_vlan(val)
                 if norm and norm != "N/A":
                     candidates.append(norm)
-                    
-    # Remove the Voice VLAN from our list of Native candidates
+
+    # Remove the Voice VLAN from our list of candidates to prevent overlap
     candidates = [c for c in candidates if c != known_voice]
     if candidates:
         return candidates[0]
         
-    # 3. Fallback to human-readable lldpctl output
-    out = run(["lldpctl"])
-    if out:
-        # Search specifically for PVID: XXXX
-        m = re.search(r"PVID\s*:\s*(\d+)", out, flags=re.IGNORECASE)
-        if m: return _normalize_vlan(m.group(1))
-        
-        # Search for any VLAN that isn't tagged as Voice
-        for line in out.splitlines():
-            if "vlan" in line.lower() and "voice" not in line.lower():
-                m2 = re.search(r"\b(\d{1,4})\b", line)
-                if m2:
-                    ans = _normalize_vlan(m2.group(1))
-                    if ans != known_voice: return ans
-                    
     return "N/A"
 
 def get_switch_info():
