@@ -15,6 +15,7 @@ DISPLAY_HEIGHT = 122
 LEFT_MARGIN = 10
 TOP_MARGIN = 4
 
+# Reduced to 14 to comfortably fit 7 total lines
 BASE_FONT_SIZE = 14
 MIN_FONT_SIZE = 10
 LINE_SPACING = 2
@@ -48,8 +49,8 @@ FONT_CACHE = {
 # ============================================================
 # -------------------- SHARED STATE --------------------------
 # ============================================================
-# 8 Items: (SW, IP, PORT, NATIVE, VOICE, SPEED, DESC, POE)
-current_data = ("Loading", "...", "...", "...", "...", "...", "...", "...")
+# 10 Items: SW, IP, PORT, NATIVE, VOICE, SPEED, DESC, POE, MODEL, OS
+current_data = ("Loading", "...", "...", "...", "...", "...", "...", "...", "...", "...")
 data_lock = threading.Lock()
 data_event = threading.Event()
 shutdown_event = threading.Event()
@@ -110,30 +111,21 @@ def _normalize_vlan(v):
 # -------------------- DISCOVERY PARSING ---------------------
 # ============================================================
 def parse_lldp_keyvalue():
-    """
-    Parses lldpctl output into a dictionary. 
-    Includes a deduplication trick to handle Juniper switches that output 
-    duplicate keys without indices (e.g., multiple 'vlan.vlan-id' keys).
-    """
     kv = {}
     out = run(["lldpctl", "-f", "keyvalue"])
     if not out: return kv
-    
     k_counts = {}
     for line in out.splitlines():
         if "=" not in line: continue
         k, v = line.split("=", 1)
         k = k.strip()
         v = v.strip()
-        
-        # Prevent Python from overwriting Native VLAN with Voice VLAN
         if k not in k_counts:
             k_counts[k] = 0
             kv[k] = v
         else:
             k_counts[k] += 1
             kv[f"{k}._{k_counts[k]}"] = v
-            
     return kv
 
 def extract_switch_hostname(kv):
@@ -195,31 +187,58 @@ def extract_port_description(kv):
     return (descr[:20] + "...") if len(descr) > 20 else descr
 
 def extract_poe(kv):
-    """
-    Extract PoE power allocation, convert from milliwatts to Watts.
-    Ignores keys that report '0' to ensure we find the actual allocated power.
-    """
     patterns = [
         rf"^lldp\.{re.escape(IFACE)}\.port\.power\.allocated",
         rf"^lldp\.{re.escape(IFACE)}\.port\.power\.requested",
         rf"^lldp\.{re.escape(IFACE)}\.med\.power\.allocated",
         rf"^lldp\.{re.escape(IFACE)}\.lldp-med\.poe\.power"
     ]
-    
     for p in patterns:
         power_str = _find_first_match_value(kv, p)
         if power_str:
             try:
-                # Convert mW to W (e.g., 2200 -> 2.2)
                 watts = float(power_str) / 1000.0
-                
-                # Only accept it if it's actually drawing power
                 if watts > 0:
                     return f"{watts:.1f}W"
             except ValueError:
                 pass
-                
     return "N/A"
+
+def extract_model_and_os(kv):
+    """
+    Parses the chassis description string for vendor-specific hardware and OS versions.
+    """
+    descr = kv.get(f"lldp.{IFACE}.chassis.descr", "")
+    if not descr:
+        return ("N/A", "N/A")
+        
+    model = "Unknown"
+    os_ver = "Unknown"
+    
+    if "Arista" in descr:
+        m = re.search(r"running on an (?:Arista Networks )?(.*)", descr)
+        if m: model = m.group(1).strip()
+        v = re.search(r"version ([\w\.-]+)", descr)
+        if v: os_ver = f"EOS {v.group(1)}"
+        
+    elif "Juniper" in descr:
+        m = re.search(r"Inc\.\s+(.*?)\s+(?:Ethernet Switch|kernel)", descr)
+        if m: model = m.group(1).strip().strip(',')
+        v = re.search(r"JUNOS ([\w\.-]+)", descr)
+        if v: os_ver = f"JUNOS {v.group(1)}"
+        
+    elif "Cisco" in descr or "cisco" in descr:
+        m = re.search(r"(?:cisco|Cisco)\s+([a-zA-Z0-9-]{5,})", descr)
+        if m: model = m.group(1).strip()
+        v = re.search(r"Version ([\w\.\(\)]+)", descr)
+        if v: os_ver = f"IOS {v.group(1)}"
+        
+    if model == "Unknown":
+        model = (descr[:18] + "..") if len(descr) > 20 else descr
+    if os_ver == "Unknown":
+        os_ver = "N/A"
+        
+    return (model, os_ver)
 
 def extract_vlans(kv):
     all_vlans = set()
@@ -297,7 +316,6 @@ def extract_vlans(kv):
         others = [v for v in all_vlans if v != voice]
         if len(others) == 1: native = others[0]
 
-    # ABSOLUTE FALLBACK
     if not native and not voice and all_vlans:
         native = sorted(list(all_vlans))[0]
 
@@ -312,11 +330,12 @@ def get_switch_info():
     descr = extract_port_description(kv)
     poe = extract_poe(kv)
     vlan, voice = extract_vlans(kv)
+    model, os_ver = extract_model_and_os(kv)
     
-    return (sw, sw_ip, port, vlan, voice, speed, descr, poe)
+    return (sw, sw_ip, port, vlan, voice, speed, descr, poe, model, os_ver)
 
 def is_data_ready(data):
-    sw, sw_ip, port, vlan, voice, speed, descr, poe = data
+    sw, sw_ip, port, vlan, voice, speed, descr, poe, model, os_ver = data
     if sw in ("Loading", "N/A", ""): return False
     if port in ("...", "N/A", ""): return False
     return True
@@ -335,7 +354,7 @@ def data_collector():
                     current_data = new_data
                     data_event.set()
             if last != new_data:
-                log.info("Data update: SW=%s IP=%s PORT=%s VLAN=%s VOICE=%s SPEED=%s DESC=%s POE=%s", *new_data)
+                log.info("Data update: SW=%s IP=%s P=%s V=%s VV=%s SP=%s D=%s PoE=%s M=%s OS=%s", *new_data)
                 last = new_data
         except Exception as e:
             log.error(f"Critical error in data collector: {e}", exc_info=True)
@@ -346,37 +365,31 @@ def data_collector():
 # -------------------- DISPLAY RENDERING ---------------------
 # ============================================================
 def render_image(data):
-    """
-    Renders TWO images for 3-color E-Ink displays.
-    Labels are drawn on the Black buffer, Variables are drawn on the Red buffer.
-    """
-    # Create two separate white canvases
+    # Unpack 10 items
+    sw, ip, port, native, voice, speed, descr, poe, model, os_ver = data
+    
     image_black = Image.new("1", (DISPLAY_WIDTH, DISPLAY_HEIGHT), 255)
     image_red = Image.new("1", (DISPLAY_WIDTH, DISPLAY_HEIGHT), 255)
     
     draw_black = ImageDraw.Draw(image_black)
     draw_red = ImageDraw.Draw(image_red)
     
-    # We build the lines using a list of tuples: (Text, is_red)
-    # True = Draw in Red buffer, False = Draw in Black buffer
-    
     # Line 1: SW
-    line1 = [("SW: ", False), (data[0], True)]
+    line1 = [("SW: ", False), (sw, True)]
     # Line 2: IP
-    line2 = [("IP: ", False), (data[1], True)]
+    line2 = [("IP: ", False), (ip, True)]
     
-    # Line 3: Port + Speed + PoE
-    line3 = [("P: ", False), (data[2], True)]
-    if data[5] != "N/A":
-        line3.extend([(" (", False), (data[5], True), (")", False)])
-    if data[7] != "N/A":
-        line3.extend([(" | ", False), (data[7], True)])
+    # Line 3: Port / Speed / PoE
+    line3 = [("P: ", False), (port, True)]
+    if speed != "N/A":
+        line3.extend([(" (", False), (speed, True), (")", False)])
+    if poe != "N/A":
+        line3.extend([(" | ", False), (poe, True)])
         
     # Line 4: Description
-    line4 = [("D: ", False), (data[6], True)]
+    line4 = [("D: ", False), (descr, True)]
     
-    # Line 5: VLAN logic
-    native, voice = data[3], data[4]
+    # Line 5: VLAN
     if native == "N/A" and voice == "N/A":
         line5 = [("VLAN: ", False), ("N/A", True)]
     elif native == "N/A" and voice != "N/A":
@@ -389,25 +402,27 @@ def render_image(data):
         else:
             line5 = [("VLAN: ", False), (native, True), (" | V-V: ", False), (voice, True)]
             
-    lines = [line1, line2, line3, line4, line5]
+    # Line 6: Model
+    line6 = [("M: ", False), (model, True)]
+    
+    # Line 7: OS Version
+    line7 = [("OS: ", False), (os_ver, True)]
+            
+    lines = [line1, line2, line3, line4, line5, line6, line7]
     
     y = TOP_MARGIN
     max_width = DISPLAY_WIDTH - (LEFT_MARGIN * 2)
     
     for line_spans in lines:
-        # Reconstruct the full string just to calculate the correct font size
         full_text = "".join([span[0] for span in line_spans])
         font = fit_font(draw_black, full_text, max_width)
         
         x = LEFT_MARGIN
-        # Draw each chunk of text in the correct color buffer, moving X over each time
         for text, is_red in line_spans:
             if is_red:
                 draw_red.text((x, y), text, font=font, fill=0)
             else:
                 draw_black.text((x, y), text, font=font, fill=0)
-            
-            # Move the cursor to the right by the width of the word we just drew
             x += draw_black.textlength(text, font=font)
             
         y += font.size + LINE_SPACING
@@ -415,15 +430,7 @@ def render_image(data):
     return image_black.rotate(180), image_red.rotate(180)
 
 def render_no_neighbor():
-    return render_image(("NO NEIGHBOR", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"))
-
-# ============================================================
-# -------------------- SIGNAL HANDLING -----------------------
-# ============================================================
-def handle_shutdown(signum, frame):
-    log.info("Shutdown requested (signal %s)", signum)
-    shutdown_event.set()
-    data_event.set()
+    return render_image(("NO NEIGHBOR", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"))
 
 # ============================================================
 # -------------------- MAIN SERVICE LOOP ---------------------
@@ -432,7 +439,6 @@ def main():
     signal.signal(signal.SIGTERM, handle_shutdown)
     signal.signal(signal.SIGINT, handle_shutdown)
     
-    # ENSURE THIS MATCHES YOUR BOARD VERSION (epd2in13b_V4 or V3)
     epd = epd2in13b_V4.EPD() 
     
     last_display_update_mono = 0.0
@@ -445,10 +451,8 @@ def main():
         epd.init()
         epd.Clear()
         
-        # Render the boot image (Unpacks the TWO buffers)
-        img_b, img_r = render_image(("Loading", "...", "...", "...", "...", "...", "...", "..."))
+        img_b, img_r = render_image(("Loading", "...", "...", "...", "...", "...", "...", "...", "...", "..."))
         epd.display(epd.getbuffer(img_b), epd.getbuffer(img_r))
-        
         log.info("Displayed boot screen (Loading)")
         
         threading.Thread(target=data_collector, daemon=True).start()
@@ -482,22 +486,19 @@ def main():
                     
                     no_neighbor_displayed = True
                     last_display_update_mono = now_mono
-                    log.warning("No neighbor after %ss; displayed NO NEIGHBOR screen.", NO_NEIGHBOR_TIMEOUT_SECONDS)
+                    log.warning("No neighbor after timeout.")
                 continue
                 
             if not is_data_ready(snap):
                 continue
                 
             if last_displayed_snap is not None and snap != last_displayed_snap:
-                # 3-color displays are slow, ensure we don't spam it while it's still flashing
                 if (now_mono - last_display_update_mono) < 20.0:
                     continue
                 
-                log.info("Data change detected: Full refresh starting (Takes ~15s)...")
+                log.info("Data change detected: Full refresh starting...")
                 epd.init()
                 img_b, img_r = render_image(snap)
-                
-                # Push both layers to the screen
                 epd.display(epd.getbuffer(img_b), epd.getbuffer(img_r))
                 epd.sleep()
                 
