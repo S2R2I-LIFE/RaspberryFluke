@@ -28,9 +28,9 @@ The goal was to build a simple, practical tool using inexpensive and widely avai
 - Runs on Raspberry Pi Zero 2 W 
 - Detects switch hostname
 - Detects switch IP address
-- Identifies switch port
-- Displays access VLAN
-- Displays voice VLAN
+- Identifies switch port & port speed (hidden unless available)
+- Displays port description (if any)
+- Displays access VLAN & voice VLAN
 - Low power E-Paper display
 - Fast boot and automatic detection
 - Powered by PoE via a PoE HAT or a USB power bank
@@ -42,9 +42,9 @@ The goal was to build a simple, practical tool using inexpensive and widely avai
 ```text
 SW: SWITCH-01  
 IP: 10.10.1.2  
-PORT: Gi1/0/24  
-VLAN: 120  
-VOICE: 130
+P: Gi1/0/24
+D: Description  
+VLAN: 120  VOICE: 130
 ```
 
 ---
