@@ -12,6 +12,8 @@ This project is a pocket-sized network diagnostic tool designed to quickly ident
 
 The device runs on a Raspberry Pi Zero 2 W and displays results on an e-Paper display, making it useful for technicians deploying or troubleshooting network equipment in the field.
 
+This variation of the project has been refined for Juniper and Arista Networking devices while also including the original CDP capabilities.
+
 ---
 
 ## Why This Exists
@@ -29,8 +31,8 @@ The goal was to build a simple, practical tool using inexpensive and widely avai
 - Low power E-Paper display
 - Fast boot and automatic detection
 - Powered by PoE via a PoE HAT or a USB power bank
-- 
-### Displays
+  
+### Currently Displays
 
 - Hostname
 - IP Address
@@ -64,7 +66,6 @@ OS: JUNOS 21.4R3-S2.4
 - Tested displays:
     - Waveshare 2.13" E-Paper HAT+ display (SKU 27467)
     - Waveshare 2.13" E-Paper HAT (B), 250x122, Red/Black/White, SPI (SKU 13448)
-
 
 ---
 
