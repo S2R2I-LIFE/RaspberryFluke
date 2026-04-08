@@ -167,8 +167,9 @@ sudo chown -R root:root /opt/raspberryfluke
 sudo cp /opt/raspberryfluke/raspberryfluke.py /opt/raspberryfluke/raspberryfluke_rw&b.py
 sudo cp /opt/raspberryfluke/raspberryfluke_b&w.py /opt/raspberryfluke/raspberryfluke.py
 ```
+
 This just copies the current .py file made for the Red, White and Black display and replaces it with the Black and White version.
-The screens will work accross the drivers although the color display does not support partial refresh leading to potential damage to the screen.
+The screens **will** share driver functionality although the color display does not support partial refresh leading to potential damage to the screen.
 
 9. Clone the Waveshare repository:
 
