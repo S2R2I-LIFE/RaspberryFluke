@@ -105,7 +105,6 @@ The script extracts relevant switch information such as hostname, IP address, po
 
 ## Installation
 
-
 1. Flash Raspberry Pi OS to the SD card using Raspberry Pi Imager.
 
 2. Boot the Raspberry Pi and update the system:
@@ -158,9 +157,18 @@ sudo systemctl restart lldpd
 
 ```bash
 sudo rm -rf /opt/raspberryfluke
-sudo git clone https://github.com/MKWB/RaspberryFluke.git /opt/raspberryfluke
+sudo git clone https://github.com/S2R2I-LIFE/RaspberryFluke.git /opt/raspberryfluke
 sudo chown -R root:root /opt/raspberryfluke
 ```
+
+**Important** - If you are using the E-Paper HAT+ with the Black and White display you will need to run this: 
+
+```bash
+sudo cp /opt/raspberryfluke/raspberryfluke.py /opt/raspberryfluke/raspberryfluke_rw&b.py
+sudo cp /opt/raspberryfluke/raspberryfluke_b&w.py /opt/raspberryfluke/raspberryfluke.py
+```
+This just copies the current .py file made for the Red, White and Black display and replaces it with the Black and White version.
+The screens will work accross the drivers although the color display does not support partial refresh leading to potential damage to the screen.
 
 9. Clone the Waveshare repository:
 
