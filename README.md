@@ -31,8 +31,12 @@ The goal was to build a simple, practical tool using inexpensive and widely avai
 - Low power E-Paper display
 - Fast boot and automatic detection
 - Powered by PoE via a PoE HAT or a USB power bank
+
+---
   
 ### Currently Displays
+
+---
 
 - Hostname
 - IP Address
