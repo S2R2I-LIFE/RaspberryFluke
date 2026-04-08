@@ -2,7 +2,6 @@
 
 # RaspberryFluke
 
----
 
 Pocket network diagnostic tool that displays LLDP/CDP switch data using a Raspberry Pi Zero 2 W, a PoE HAT, and an E-Paper display.
 
@@ -12,7 +11,6 @@ Inspired by the functionality of commercial network port identification tools us
 
 ## Overview
 
----
 
 This project is a pocket-sized network diagnostic tool designed to quickly identify switch port information such as hostname, IP address, port number, VLAN, and voice VLAN using LLDP/CDP.  
 
@@ -24,7 +22,6 @@ This variation of the project has been refined for Juniper and Arista Networking
 
 ## Why This Exists
 
----
 
 Commercial network diagnostic tools that provide quick switch port identification can be expensive. This project explores how a small Linux-based device can extract useful switch information using LLDP/CDP and display it on a low-power screen.
 
@@ -34,7 +31,6 @@ The goal was to build a simple, practical tool using inexpensive and widely avai
 
 ## Features
 
----
 
 - Runs on Raspberry Pi Zero 2 W
 - Low power E-Paper display
@@ -45,7 +41,6 @@ The goal was to build a simple, practical tool using inexpensive and widely avai
   
 ### Currently Displays
 
----
 
 - Hostname
 - IP Address
@@ -59,7 +54,6 @@ The goal was to build a simple, practical tool using inexpensive and widely avai
 
 ### Display Output
 
----
 
 ```text
 SW: SWITCH-01  
@@ -75,7 +69,6 @@ OS: JUNOS 21.4R3-S2.4
 
 ## Hardware
 
----
 
 - Raspberry Pi Zero 2 W
 - 40-pin male GPIO Header
@@ -88,7 +81,6 @@ OS: JUNOS 21.4R3-S2.4
 
 ## Software
 
----
 
 - Raspberry Pi OS
 - Python
@@ -100,7 +92,6 @@ OS: JUNOS 21.4R3-S2.4
 
 ## How It Works
 
----
 
 Connect the device to an Ethernet cable connected to an active switch.
 
@@ -114,7 +105,6 @@ The script extracts relevant switch information such as hostname, IP address, po
 
 ## Installation
 
----
 
 1. Flash Raspberry Pi OS to the SD card using Raspberry Pi Imager.
 
