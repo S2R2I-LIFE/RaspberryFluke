@@ -447,7 +447,7 @@ def main():
     signal.signal(signal.SIGTERM, handle_shutdown)
     signal.signal(signal.SIGINT, handle_shutdown)
     
-    epd = epd2in13b_V4.EPD() 
+    epd = epd2in13_V3.EPD() 
     
     last_display_update_mono = 0.0
     first_ready_displayed = False
@@ -456,12 +456,8 @@ def main():
     last_displayed_snap = None
     
     try:
-        epd.init()
-        epd.Clear()
-        
-        img_b, img_r = render_image(("Loading", "...", "...", "...", "...", "...", "...", "...", "...", "..."))
-        epd.display(epd.getbuffer(img_b), epd.getbuffer(img_r))
-        log.info("Displayed boot screen (Loading)")
+        # We skip the Loading screen and go straight to collecting data!
+        log.info("Starting data collector, waiting for first neighbor...")
         
         threading.Thread(target=data_collector, daemon=True).start()
         
