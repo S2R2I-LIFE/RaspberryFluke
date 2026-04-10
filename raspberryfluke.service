@@ -8,7 +8,7 @@ Type=simple
 User=root
 Group=root
 WorkingDirectory=/opt/raspberryfluke
-Environment=PYTHONPATH=/opt/raspberryfluke
+Environment=PYTHONPATH=/opt/raspberryfluke PYTHONUNBUFFERED=1
 ExecStart=/usr/bin/python3 /opt/raspberryfluke/raspberryfluke.py
 Restart=on-failure
 RestartSec=3
