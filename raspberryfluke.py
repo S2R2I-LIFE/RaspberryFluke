@@ -26,8 +26,8 @@ IFACE = "eth0"
 POLL_INTERVAL_SECONDS = 1
 SUBPROCESS_TIMEOUT_SECONDS = 3
 NO_NEIGHBOR_TIMEOUT_SECONDS = 180
-MIN_DISPLAY_UPDATE_INTERVAL_SECONDS = 10
-PARTIAL_REFRESH_LIMIT = 8
+MIN_DISPLAY_UPDATE_INTERVAL_SECONDS = 15
+# PARTIAL_REFRESH_LIMIT = 8
 
 # ============================================================
 # -------------------- LOGGING -------------------------------
@@ -497,7 +497,7 @@ def main():
                 continue
                 
             if last_displayed_snap is not None and snap != last_displayed_snap:
-                if (now_mono - last_display_update_mono) < 20.0:
+                if (now_mono - last_display_update_mono) < MIN_DISPLAY_UPDATE_INTERVAL_SECONDS:
                     continue
                 
                 log.info("Data change detected: Full refresh starting...")
