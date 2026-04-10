@@ -162,16 +162,29 @@ def extract_port_speed(kv):
         if "100g" in val: return "100G"
         return None
 
+    # 1. PRIMARY: Ask the Pi's physical interface what speed it negotiated
+    try:
+        with open(f"/sys/class/net/{IFACE}/speed", "r") as f:
+            local_speed = f.read().strip()
+            # If link is up, this usually returns "10", "100", or "1000"
+            if local_speed and local_speed != "-1":
+                fmt = format_speed(local_speed)
+                if fmt: return fmt
+    except Exception:
+        pass
+
+    # 2. FALLBACK: Check LLDP Key-Value pairs for MAU/Speed
     speed = kv.get(f"lldp.{IFACE}.port.speed", "")
     if speed:
         fmt = format_speed(speed)
         if fmt: return fmt
-
+        
     mau_key = _find_first_match_value(kv, rf"^lldp\.{re.escape(IFACE)}\.mac\.mau")
     if mau_key:
         fmt = format_speed(mau_key)
         if fmt: return fmt
 
+    # 3. FALLBACK: Check raw lldpctl output
     out = run(["lldpctl"])
     if out:
         m = re.search(r"Operational MAU Type\s*:\s*([A-Za-z0-9\-]+)", out, flags=re.IGNORECASE)
