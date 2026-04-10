@@ -321,8 +321,42 @@ def extract_vlans(kv):
 
     return (native or "N/A", voice or "N/A")
 
+def is_endpoint_device(kv):
+    """
+    Intelligently filters out IP Phones, Voice Controllers, and APs.
+    Returns True if the data belongs to an endpoint, False if it's a switch.
+    """
+    # 1. Check standardized LLDP capabilities first
+    for k, v in kv.items():
+        if v == "on":
+            # If it explicitly says it is a Switch (Bridge) or Router, allow it.
+            if "Bridge.enabled" in k or "Router.enabled" in k:
+                return False 
+                
+    for k, v in kv.items():
+        if v == "on":
+            # If it explicitly identifies as a Phone, AP, or Station, block it.
+            if "Telephone.enabled" in k or "Wlan.enabled" in k or "Station.enabled" in k:
+                return True   
+                
+    # 2. Heuristic fallback (CDP often relies on description strings instead of capabilities)
+    for k, v in kv.items():
+        if "descr" in k.lower() or "name" in k.lower():
+            val = v.lower()
+            # If it's running a known switch OS, allow it
+            if "ios " in val or "junos" in val or "arista" in val or "nexus" in val or "catalyst" in val:
+                return False
+            # If it explicitly says phone or voice controller, block it
+            if "phone" in val or "voice controller" in val or "polycom" in val or "access point" in val:
+                return True
+                
+    # 3. Default to False (Allow) so we don't accidentally blind the tool to unknown switches
+    return False
+
 def get_switch_info():
     kv = parse_lldp_keyvalue()
+    if is_endpoint_device(kv):
+        return ("Loading", "...", "...", "...", "...", "...", "...", "...", "...", "...")
     sw = extract_switch_hostname(kv)
     sw_ip = extract_switch_ip(kv)
     port = extract_port(kv)
