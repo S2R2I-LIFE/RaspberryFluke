@@ -13,7 +13,7 @@ This model is designed to act as a replacement lid that seamlessly integrates wi
 ## 🖨️ Recommended Print Settings
 This model was tested and optimized on a **Creality K1** using the **CFS (Creality Filament System)** for the multi-color text and two-tone aesthetic. You do not need a CFS to get the color for the lid if you are able to swap the filament it is only a single layer that gives it the pop color!
 
-* **Printer:** Creality K1 (or similar enclosed CoreXY)
+* **Printer Used:** Creality K1 with CFS upgrade
 * **Nozzle Size:** 0.4 mm
 * **Material:** PETG *(Highly recommended over PLA, as the PoE HAT and Pi Zero can generate warm temperatures during continuous use).*
 * **Infill:** 15%
