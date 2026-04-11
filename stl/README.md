@@ -1,4 +1,4 @@
-# Pi-Fluke: DIY PoE Network Tester Case
+# Pi-Fluke Case Lid
 
 A custom 3D-printed lid and bezel designed to turn a Raspberry Pi Zero into a sleek, professional, PoE-powered network discovery tool (LLDP/CDP). 
 
